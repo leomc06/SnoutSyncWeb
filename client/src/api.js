@@ -12,15 +12,15 @@ export async function api(path, options = {}) {
     body: options.body ? JSON.stringify(options.body) : undefined
   });
 
-  const data = await response.json().catch(() => ({}));
+  const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 401) {
       localStorage.removeItem('snoutsync:user');
       localStorage.removeItem('snoutsync:token');
     }
-    throw new Error(data.error || 'Erro ao comunicar com a API.');
+    throw new Error(payload.error?.message || payload.error || 'Erro ao comunicar com a API.');
   }
-  return data;
+  return payload?.success ? payload.data : payload;
 }
 
 export { API_URL };

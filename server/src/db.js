@@ -1,24 +1,12 @@
 import pg from 'pg';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import dotenv from 'dotenv';
+import { env } from './config/env.js';
 
 const { Pool } = pg;
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(__dirname, '../../.env'), quiet: true });
-
-const connectionString = process.env.DATABASE_URL;
 
 export const pool = new Pool(
-  connectionString
-    ? { connectionString }
-    : {
-        host: process.env.POSTGRES_HOST || 'localhost',
-        port: Number(process.env.POSTGRES_PORT || 5432),
-        user: process.env.POSTGRES_USER || 'postgres',
-        password: process.env.POSTGRES_PASSWORD || 'postgres',
-        database: process.env.POSTGRES_DB || 'SnoutSync'
-      }
+  env.databaseUrl
+    ? { connectionString: env.databaseUrl }
+    : env.postgres
 );
 
 export function query(text, params) {

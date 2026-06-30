@@ -45,13 +45,16 @@ test('API autentica e protege rotas principais', async () => {
       body: JSON.stringify({ usuario: 'leonardo', senha: 'TROCAR_SENHA' })
     });
     assert.equal(login.status, 200);
-    const session = await login.json();
+    const loginPayload = await login.json();
+    assert.equal(loginPayload.success, true);
+    const session = loginPayload.data;
     assert.ok(session.token);
 
     const dashboard = await fetch(`${baseUrl}/api/dashboard`, { headers: { Authorization: `Bearer ${session.token}` } });
     assert.equal(dashboard.status, 200);
-    const data = await dashboard.json();
-    assert.ok(data.metrics);
+    const dashboardPayload = await dashboard.json();
+    assert.equal(dashboardPayload.success, true);
+    assert.ok(dashboardPayload.data.metrics);
 
     const ai = await fetch(`${baseUrl}/api/ai/status`, { headers: { Authorization: `Bearer ${session.token}` } });
     assert.equal(ai.status, 200);

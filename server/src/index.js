@@ -1,33 +1,24 @@
 import express from 'express';
-import cors from 'cors';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import PDFDocument from 'pdfkit';
 import { pool, query, transaction } from './db.js';
+import { env, assertProductionEnv } from './config/env.js';
+import { ensureSchema } from './database/ensureSchema.js';
+import { requireAuth, signToken, verifyPassword } from './middlewares/auth.js';
+import { errorHandler, notFoundHandler } from './middlewares/errors.js';
+import { apiRateLimit, authRateLimit, compressionMiddleware, corsMiddleware, requestId, securityHeaders } from './middlewares/security.js';
+import { asyncRoute, badRequest, conflict, created, notFound, ok, unauthorized } from './utils/http.js';
+import { required, validateDate, validateEnum, validateMoney, validatePositiveInt, validateTime } from './utils/validators.js';
 
 const app = express();
-const port = Number(process.env.API_PORT || 3001);
-const jwtSecret = process.env.JWT_SECRET || 'snoutsync-dev-secret-change-me';
+assertProductionEnv();
 
-app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }));
+app.set('trust proxy', 1);
+app.use(requestId);
+app.use(securityHeaders);
+app.use(compressionMiddleware);
+app.use(corsMiddleware());
+app.use(apiRateLimit);
 app.use(express.json({ limit: '1mb' }));
-
-function signToken(user) {
-  return jwt.sign({ id: user.id, nome: user.nome, usuario: user.usuario, perfil: user.perfil }, jwtSecret, { expiresIn: '8h' });
-}
-
-function requireAuth(req, res, next) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-  if (!token) return res.status(401).json({ error: 'Token nao enviado.' });
-
-  try {
-    req.user = jwt.verify(token, jwtSecret);
-    next();
-  } catch {
-    res.status(401).json({ error: 'Token invalido ou expirado.' });
-  }
-}
 
 app.get('/', (_req, res) => {
   res.json({
@@ -58,59 +49,6 @@ const statusDb = {
 
 const porteLabels = { P: 'Pequeno', M: 'Medio', G: 'Grande' };
 const porteDb = { Pequeno: 'P', Medio: 'M', Grande: 'G', P: 'P', M: 'M', G: 'G' };
-
-function asyncRoute(handler) {
-  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
-}
-
-function required(value, field) {
-  if (value === undefined || value === null || String(value).trim() === '') {
-    const error = new Error(`Campo obrigatorio: ${field}`);
-    error.status = 400;
-    throw error;
-  }
-  return value;
-}
-
-function validateDate(value, field = 'data') {
-  required(value, field);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value))) {
-    const error = new Error(`Campo ${field} deve estar no formato yyyy-mm-dd.`);
-    error.status = 400;
-    throw error;
-  }
-  return value;
-}
-
-function validateTime(value, field = 'hora') {
-  required(value, field);
-  if (!/^\d{2}:\d{2}(:\d{2})?$/.test(String(value))) {
-    const error = new Error(`Campo ${field} deve estar no formato hh:mm.`);
-    error.status = 400;
-    throw error;
-  }
-  return String(value).slice(0, 5);
-}
-
-function validateEnum(value, allowed, field) {
-  required(value, field);
-  if (!allowed.includes(value)) {
-    const error = new Error(`Campo ${field} invalido. Use: ${allowed.join(', ')}.`);
-    error.status = 400;
-    throw error;
-  }
-  return value;
-}
-
-function validateMoney(value, field) {
-  const number = Number(required(value, field));
-  if (!Number.isFinite(number) || number < 0) {
-    const error = new Error(`Campo ${field} deve ser um numero positivo.`);
-    error.status = 400;
-    throw error;
-  }
-  return number;
-}
 
 function toMoney(value) {
   return Number(value || 0);
@@ -171,32 +109,6 @@ const duracaoServicoSql = `
   END
 `;
 
-async function ensureSupportTables() {
-  await query(`
-    CREATE TABLE IF NOT EXISTS historico_pet (
-      id SERIAL PRIMARY KEY,
-      pet_id INTEGER NOT NULL REFERENCES pet(id) ON DELETE CASCADE,
-      agendamento_id INTEGER REFERENCES agendamento(id) ON DELETE SET NULL,
-      tipo VARCHAR(50) NOT NULL,
-      descricao TEXT NOT NULL,
-      criado_em TIMESTAMP NOT NULL DEFAULT NOW()
-    )
-  `);
-}
-
-async function verifyPassword(inputPassword, storedPassword, userId) {
-  if (storedPassword?.startsWith('$2')) {
-    return bcrypt.compare(inputPassword, storedPassword);
-  }
-
-  const valid = inputPassword === storedPassword;
-  if (valid) {
-    const hash = await bcrypt.hash(inputPassword, 10);
-    await query('UPDATE usuario SET senha = $1 WHERE id = $2', [hash, userId]);
-  }
-  return valid;
-}
-
 async function assertNoScheduleConflict({ petId, servicoId, data, hora, excludeId = null }) {
   const params = [petId, servicoId, data, hora, excludeId];
   const { rows } = await query(
@@ -226,9 +138,7 @@ async function assertNoScheduleConflict({ petId, servicoId, data, hora, excludeI
   );
 
   if (rows[0]) {
-    const error = new Error(`Conflito de horario com ${rows[0].pet_nome} (${rows[0].servico_nome}).`);
-    error.status = 409;
-    throw error;
+    throw conflict(`Conflito de horario com ${rows[0].pet_nome} (${rows[0].servico_nome}).`, rows[0]);
   }
 }
 
@@ -485,11 +395,11 @@ function localAiFallback(question, context) {
 }
 
 async function askLanguageModel(question, context) {
-  const apiKey = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
+  const apiKey = env.aiApiKey;
   if (!apiKey) return null;
 
-  const baseUrl = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
-  const model = process.env.AI_MODEL || 'gpt-5.5';
+  const baseUrl = env.aiBaseUrl.replace(/\/$/, '');
+  const model = env.aiModel;
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -523,10 +433,10 @@ async function askLanguageModel(question, context) {
 
 app.get('/api/health', asyncRoute(async (_req, res) => {
   const { rows } = await query('SELECT current_database() AS database, current_user AS user, NOW() AS now');
-  res.json({ ok: true, postgres: rows[0] });
+  ok(res, { postgres: rows[0], uptime: process.uptime() });
 }));
 
-app.post('/api/auth/login', asyncRoute(async (req, res) => {
+app.post('/api/auth/login', authRateLimit, asyncRoute(async (req, res) => {
   const usuario = required(req.body.usuario, 'usuario');
   const senha = required(req.body.senha, 'senha');
   const { rows } = await query(
@@ -537,20 +447,20 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
     [usuario]
   );
   if (!rows[0] || !(await verifyPassword(senha, rows[0].senha, rows[0].id))) {
-    return res.status(401).json({ error: 'Usuario ou senha invalidos.' });
+    throw unauthorized('Usuario ou senha invalidos.');
   }
   const { senha: _senha, ...user } = rows[0];
-  res.json({ user, token: signToken(user) });
+  ok(res, { user, token: signToken(user) });
 }));
 
 app.use('/api', requireAuth);
 
 app.get('/api/dashboard', asyncRoute(async (_req, res) => {
-  res.json(await dashboardData());
+  ok(res, await dashboardData());
 }));
 
 app.get('/api/clientes', asyncRoute(async (req, res) => {
-  res.json(await listClientes(req.query.search || ''));
+  ok(res, await listClientes(req.query.search || ''));
 }));
 
 app.post('/api/clientes', asyncRoute(async (req, res) => {
@@ -577,7 +487,7 @@ app.post('/api/clientes', asyncRoute(async (req, res) => {
     }
     return clienteId;
   });
-  res.status(201).json({ id: result });
+  created(res, { id: result });
 }));
 
 app.put('/api/clientes/:clienteId/pets/:petId', asyncRoute(async (req, res) => {
@@ -607,7 +517,7 @@ app.put('/api/clientes/:clienteId/pets/:petId', asyncRoute(async (req, res) => {
       await client.query('DELETE FROM plano WHERE cliente_id = $1', [clienteId]);
     }
   });
-  res.json({ ok: true });
+  ok(res, { updated: true });
 }));
 
 app.delete('/api/clientes/:clienteId', asyncRoute(async (req, res) => {
@@ -619,7 +529,7 @@ app.delete('/api/clientes/:clienteId', asyncRoute(async (req, res) => {
     await client.query('DELETE FROM pet WHERE cliente_id = $1', [clienteId]);
     await client.query('DELETE FROM cliente WHERE id = $1', [clienteId]);
   });
-  res.json({ ok: true });
+  ok(res, { deleted: true });
 }));
 
 app.get('/api/pets', asyncRoute(async (_req, res) => {
@@ -628,7 +538,7 @@ app.get('/api/pets', asyncRoute(async (_req, res) => {
        FROM pet p JOIN cliente c ON c.id = p.cliente_id
       ORDER BY c.nome, p.nome`
   );
-  res.json(rows);
+  ok(res, rows);
 }));
 
 app.get('/api/pets/:id/historico', asyncRoute(async (req, res) => {
@@ -646,12 +556,12 @@ app.get('/api/pets/:id/historico', asyncRoute(async (req, res) => {
     ),
     query('SELECT id, tipo, descricao, criado_em::text AS criado_em FROM historico_pet WHERE pet_id = $1 ORDER BY criado_em DESC', [petId])
   ]);
-  res.json({ agendamentos: agenda.rows, historico: historico.rows });
+  ok(res, { agendamentos: agenda.rows, historico: historico.rows });
 }));
 
 app.get('/api/servicos', asyncRoute(async (_req, res) => {
   const { rows } = await query('SELECT * FROM servico ORDER BY nome');
-  res.json(rows);
+  ok(res, rows);
 }));
 
 app.post('/api/servicos', asyncRoute(async (req, res) => {
@@ -671,7 +581,7 @@ app.post('/api/servicos', asyncRoute(async (req, res) => {
       Number(required(body.duracao_grande, 'duracao_grande'))
     ]
   );
-  res.status(201).json(rows[0]);
+  created(res, rows[0]);
 }));
 
 app.put('/api/servicos/:id', asyncRoute(async (req, res) => {
@@ -694,19 +604,19 @@ app.put('/api/servicos/:id', asyncRoute(async (req, res) => {
       req.params.id
     ]
   );
-  if (!rows[0]) return res.status(404).json({ error: 'Servico nao encontrado.' });
-  res.json(rows[0]);
+  if (!rows[0]) throw notFound('Servico nao encontrado.');
+  ok(res, rows[0]);
 }));
 
 app.delete('/api/servicos/:id', asyncRoute(async (req, res) => {
   const used = await query('SELECT id FROM agendamento WHERE servico_id = $1 LIMIT 1', [req.params.id]);
-  if (used.rows[0]) return res.status(409).json({ error: 'Servico ja possui agendamentos e nao pode ser excluido.' });
+  if (used.rows[0]) throw conflict('Servico ja possui agendamentos e nao pode ser excluido.');
   await query('DELETE FROM servico WHERE id = $1', [req.params.id]);
-  res.json({ ok: true });
+  ok(res, { deleted: true });
 }));
 
 app.get('/api/agendamentos', asyncRoute(async (req, res) => {
-  res.json(await listAgendamentos(req.query));
+  ok(res, await listAgendamentos(req.query));
 }));
 
 app.post('/api/agendamentos', asyncRoute(async (req, res) => {
@@ -723,7 +633,7 @@ app.post('/api/agendamentos', asyncRoute(async (req, res) => {
      RETURNING id`,
     [petId, servicoId, data, hora, status, body.observacoes || null]
   );
-  res.status(201).json({ id: rows[0].id });
+  created(res, { id: rows[0].id });
 }));
 
 app.put('/api/agendamentos/:id', asyncRoute(async (req, res) => {
@@ -740,7 +650,7 @@ app.put('/api/agendamentos/:id', asyncRoute(async (req, res) => {
       WHERE id = $7`,
     [petId, servicoId, data, hora, status, body.observacoes || null, req.params.id]
   );
-  res.json({ ok: true });
+  ok(res, { updated: true });
 }));
 
 app.post('/api/agendamentos/:id/concluir', asyncRoute(async (req, res) => {
@@ -751,9 +661,7 @@ app.post('/api/agendamentos/:id/concluir', asyncRoute(async (req, res) => {
   await transaction(async (client) => {
     const agendamento = await client.query('SELECT pet_id FROM agendamento WHERE id = $1', [agendamentoId]);
     if (!agendamento.rows[0]) {
-      const error = new Error('Agendamento nao encontrado.');
-      error.status = 404;
-      throw error;
+      throw notFound('Agendamento nao encontrado.');
     }
 
     await client.query('UPDATE agendamento SET status = $1::status_agendamento WHERE id = $2', ['CONCLUIDO', agendamentoId]);
@@ -771,7 +679,7 @@ app.post('/api/agendamentos/:id/concluir', asyncRoute(async (req, res) => {
     );
   });
 
-  res.json({ ok: true });
+  ok(res, { deleted: true });
 }));
 
 app.delete('/api/agendamentos/:id', asyncRoute(async (req, res) => {
@@ -779,11 +687,11 @@ app.delete('/api/agendamentos/:id', asyncRoute(async (req, res) => {
     await client.query('DELETE FROM atendimento WHERE agendamento_id = $1', [req.params.id]);
     await client.query('DELETE FROM agendamento WHERE id = $1', [req.params.id]);
   });
-  res.json({ ok: true });
+  ok(res, { completed: true });
 }));
 
 app.get('/api/financeiro', asyncRoute(async (_req, res) => {
-  res.json(await financeiroData());
+  ok(res, await financeiroData());
 }));
 
 app.get('/api/relatorios/financeiro.csv', asyncRoute(async (_req, res) => {
@@ -819,17 +727,17 @@ app.get('/api/relatorios/financeiro.pdf', asyncRoute(async (_req, res) => {
 }));
 
 app.get('/api/ai/status', (_req, res) => {
-  res.json({
-    configured: Boolean(process.env.AI_API_KEY || process.env.OPENAI_API_KEY),
-    model: process.env.AI_MODEL || 'gpt-5.5',
-    baseUrl: process.env.AI_BASE_URL || 'https://api.openai.com/v1'
+  ok(res, {
+    configured: Boolean(env.aiApiKey),
+    model: env.aiModel,
+    baseUrl: env.aiBaseUrl
   });
 });
 
 app.post('/api/ai/ask', asyncRoute(async (req, res) => {
   const question = String(req.body.question || '').trim();
   if (!question) {
-    return res.status(400).json({ error: 'Envie uma pergunta.' });
+    throw badRequest('Envie uma pergunta.');
   }
 
   const context = await aiContext(question);
@@ -842,33 +750,27 @@ app.post('/api/ai/ask', asyncRoute(async (req, res) => {
   }
   const answer = modelAnswer || localAiFallback(question, context);
 
-  res.json({
+  ok(res, {
     answer,
     source: modelAnswer ? 'LLM configurada com contexto do PostgreSQL conectado' : 'Fallback local com contexto do PostgreSQL conectado',
-    aiConfigured: Boolean(process.env.AI_API_KEY || process.env.OPENAI_API_KEY),
+    aiConfigured: Boolean(env.aiApiKey),
     aiUsed: Boolean(modelAnswer),
     warning: aiWarning
   });
 }));
 
-app.use((req, res) => {
-  res.status(404).json({ error: 'Rota nao encontrada.' });
-});
-
-app.use((err, _req, res, _next) => {
-  console.error(err);
-  res.status(err.status || 500).json({ error: err.message || 'Erro interno.' });
-});
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 process.on('SIGINT', async () => {
   await pool.end();
   process.exit(0);
 });
 
-ensureSupportTables()
+ensureSchema()
   .then(() => {
-    app.listen(port, () => {
-      console.log(`SnoutSync API rodando em http://localhost:${port}`);
+    app.listen(env.port, () => {
+      console.log(`SnoutSync API rodando em http://localhost:${env.port}`);
     });
   })
   .catch((error) => {
