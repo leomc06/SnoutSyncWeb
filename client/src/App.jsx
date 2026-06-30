@@ -478,7 +478,7 @@ function Assistant() {
 
   return (
     <>
-      <Header title="IA e Consultas" subtitle="Assistente analitico consultando o PostgreSQL conectado." />
+      <Header title="IA e Consultas" />
       <section className="assistant-card">
         <form onSubmit={ask}>
           <textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="Pergunte sobre agenda, clientes, faturamento ou melhorias" />
