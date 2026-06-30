@@ -485,7 +485,6 @@ function Assistant() {
           <button className="primary" disabled={loading}>{loading ? 'Consultando...' : 'Perguntar'}</button>
         </form>
         {answer && <pre>{answer}</pre>}
-        <div className="suggestions"><button onClick={() => setQuestion('Quais agendamentos tenho hoje?')}>Agenda de hoje</button><button onClick={() => setQuestion('Quantos clientes tenho?')}>Clientes</button><button onClick={() => setQuestion('Sugestoes de melhoria')}>Melhorias</button></div>
       </section>
     </>
   );
