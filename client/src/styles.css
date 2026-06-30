@@ -53,6 +53,7 @@ main { padding: 32px; overflow: hidden; }
 .row, .table-row { display: grid; grid-template-columns: 90px 1fr 1fr 120px; gap: 14px; align-items: center; padding: 14px 0; border-top: 1px solid #edf2f7; }
 .table-row { grid-template-columns: 1.2fr 1.2fr .8fr .7fr 150px; }
 .table-row.schedule { grid-template-columns: .8fr 1.2fr 1fr .7fr 150px; }
+.table-row.service-row { grid-template-columns: 1.4fr .8fr .8fr .8fr 150px; }
 .table-row span { display: grid; gap: 4px; }
 small { color: #64748b; }
 .badge { width: fit-content; border-radius: 999px; padding: 8px 12px; background: #e0f2fe; color: #0f62a8; font-weight: 900; font-size: 12px; }
@@ -69,6 +70,7 @@ small { color: #64748b; }
 .toolbar.multi { display: grid; grid-template-columns: 180px 180px 1fr 100px; }
 .table-card { overflow-x: auto; }
 .actions { display: flex !important; flex-direction: row; gap: 8px; }
+.actions button { white-space: nowrap; }
 .actions button:last-child { color: #b91c1c; background: #fee2e2; }
 .empty-state { padding: 36px; text-align: center; color: #64748b; background: #f8fbff; border-radius: 18px; }
 .alert { border-radius: 16px; padding: 14px 16px; background: #fee2e2; color: #991b1b; font-weight: 800; }
@@ -84,6 +86,9 @@ small { color: #64748b; }
 .assistant-card form { display: grid; gap: 14px; }
 .assistant-card pre { white-space: pre-wrap; background: #0f2852; color: white; border-radius: 20px; padding: 20px; line-height: 1.6; }
 .suggestions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+.history-list { display: grid; gap: 14px; }
+.history-list h3 { margin: 8px 0 0; }
+.history-item { display: grid; gap: 4px; padding: 14px; border: 1px solid #e6edf7; border-radius: 16px; background: #f8fbff; }
 
 @media (max-width: 980px) {
   .login-page, .app-shell, .two-columns { grid-template-columns: 1fr; }
@@ -96,5 +101,5 @@ small { color: #64748b; }
   main, .login-card, .login-hero { padding: 24px; }
   .metrics-grid, .form-grid { grid-template-columns: 1fr; }
   .page-header { align-items: flex-start; flex-direction: column; }
-  .table-row, .table-row.schedule, .row { grid-template-columns: 1fr; }
+  .table-row, .table-row.schedule, .table-row.service-row, .row { grid-template-columns: 1fr; }
 }

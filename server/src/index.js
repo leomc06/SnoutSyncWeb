@@ -1,19 +1,40 @@
 import express from 'express';
 import cors from 'cors';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import PDFDocument from 'pdfkit';
 import { pool, query, transaction } from './db.js';
 
 const app = express();
 const port = Number(process.env.API_PORT || 3001);
+const jwtSecret = process.env.JWT_SECRET || 'snoutsync-dev-secret-change-me';
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }));
 app.use(express.json({ limit: '1mb' }));
+
+function signToken(user) {
+  return jwt.sign({ id: user.id, nome: user.nome, usuario: user.usuario, perfil: user.perfil }, jwtSecret, { expiresIn: '8h' });
+}
+
+function requireAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) return res.status(401).json({ error: 'Token nao enviado.' });
+
+  try {
+    req.user = jwt.verify(token, jwtSecret);
+    next();
+  } catch {
+    res.status(401).json({ error: 'Token invalido ou expirado.' });
+  }
+}
 
 app.get('/', (_req, res) => {
   res.json({
     name: 'SnoutSync API',
     status: 'online',
     message: 'Use as rotas em /api. Exemplo: /api/health',
-    routes: ['/api/health', '/api/dashboard', '/api/clientes', '/api/agendamentos', '/api/financeiro', '/api/ai/ask']
+    routes: ['/api/health', '/api/dashboard', '/api/clientes', '/api/agendamentos', '/api/servicos', '/api/financeiro', '/api/relatorios/financeiro.csv', '/api/relatorios/financeiro.pdf', '/api/ai/ask']
   });
 });
 
@@ -51,6 +72,46 @@ function required(value, field) {
   return value;
 }
 
+function validateDate(value, field = 'data') {
+  required(value, field);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value))) {
+    const error = new Error(`Campo ${field} deve estar no formato yyyy-mm-dd.`);
+    error.status = 400;
+    throw error;
+  }
+  return value;
+}
+
+function validateTime(value, field = 'hora') {
+  required(value, field);
+  if (!/^\d{2}:\d{2}(:\d{2})?$/.test(String(value))) {
+    const error = new Error(`Campo ${field} deve estar no formato hh:mm.`);
+    error.status = 400;
+    throw error;
+  }
+  return String(value).slice(0, 5);
+}
+
+function validateEnum(value, allowed, field) {
+  required(value, field);
+  if (!allowed.includes(value)) {
+    const error = new Error(`Campo ${field} invalido. Use: ${allowed.join(', ')}.`);
+    error.status = 400;
+    throw error;
+  }
+  return value;
+}
+
+function validateMoney(value, field) {
+  const number = Number(required(value, field));
+  if (!Number.isFinite(number) || number < 0) {
+    const error = new Error(`Campo ${field} deve ser um numero positivo.`);
+    error.status = 400;
+    throw error;
+  }
+  return number;
+}
+
 function toMoney(value) {
   return Number(value || 0);
 }
@@ -86,7 +147,11 @@ function mapAgendamento(row) {
     status: row.status,
     status_label: statusLabels[row.status] || row.status,
     observacoes: row.observacoes || '',
-    valor_estimado: toMoney(row.valor_estimado)
+    valor_estimado: toMoney(row.valor_estimado),
+    atendimento_id: row.atendimento_id || null,
+    valor_cobrado: row.valor_cobrado === null ? null : toMoney(row.valor_cobrado),
+    forma_pagamento: row.forma_pagamento || '',
+    data_hora_conclusao: row.data_hora_conclusao || null
   };
 }
 
@@ -97,6 +162,75 @@ const valorServicoSql = `
     ELSE COALESCE(s.preco_medio, 0)
   END
 `;
+
+const duracaoServicoSql = `
+  CASE p.porte
+    WHEN 'P' THEN COALESCE(s.duracao_pequeno, 60)
+    WHEN 'G' THEN COALESCE(s.duracao_grande, 60)
+    ELSE COALESCE(s.duracao_medio, 60)
+  END
+`;
+
+async function ensureSupportTables() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS historico_pet (
+      id SERIAL PRIMARY KEY,
+      pet_id INTEGER NOT NULL REFERENCES pet(id) ON DELETE CASCADE,
+      agendamento_id INTEGER REFERENCES agendamento(id) ON DELETE SET NULL,
+      tipo VARCHAR(50) NOT NULL,
+      descricao TEXT NOT NULL,
+      criado_em TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+async function verifyPassword(inputPassword, storedPassword, userId) {
+  if (storedPassword?.startsWith('$2')) {
+    return bcrypt.compare(inputPassword, storedPassword);
+  }
+
+  const valid = inputPassword === storedPassword;
+  if (valid) {
+    const hash = await bcrypt.hash(inputPassword, 10);
+    await query('UPDATE usuario SET senha = $1 WHERE id = $2', [hash, userId]);
+  }
+  return valid;
+}
+
+async function assertNoScheduleConflict({ petId, servicoId, data, hora, excludeId = null }) {
+  const params = [petId, servicoId, data, hora, excludeId];
+  const { rows } = await query(
+    `WITH novo AS (
+       SELECT ($3::date + $4::time) AS inicio,
+              ($3::date + $4::time) + (${duracaoServicoSql} * INTERVAL '1 minute') AS fim
+         FROM pet p
+         JOIN servico s ON s.id = $2
+        WHERE p.id = $1
+     ), existentes AS (
+       SELECT a.id, p.nome AS pet_nome, s.nome AS servico_nome,
+              (a.data + a.hora) AS inicio,
+              (a.data + a.hora) + (${duracaoServicoSql} * INTERVAL '1 minute') AS fim
+         FROM agendamento a
+         JOIN pet p ON p.id = a.pet_id
+         JOIN servico s ON s.id = a.servico_id
+        WHERE a.data = $3::date
+          AND a.status <> 'CANCELADO'
+          AND ($5::int IS NULL OR a.id <> $5::int)
+     )
+     SELECT e.*
+       FROM existentes e
+       CROSS JOIN novo n
+      WHERE e.inicio < n.fim AND e.fim > n.inicio
+      LIMIT 1`,
+    params
+  );
+
+  if (rows[0]) {
+    const error = new Error(`Conflito de horario com ${rows[0].pet_nome} (${rows[0].servico_nome}).`);
+    error.status = 409;
+    throw error;
+  }
+}
 
 async function listClientes(search = '') {
   const params = [];
@@ -139,11 +273,13 @@ async function listAgendamentos({ data, status, search } = {}) {
   const { rows } = await query(
     `SELECT a.id, a.pet_id, a.servico_id, p.cliente_id, c.nome AS cliente_nome,
             p.nome AS pet_nome, s.nome AS servico_nome, a.data::text AS data, a.hora::text AS hora,
-            a.status::text AS status, a.observacoes, ${valorServicoSql} AS valor_estimado
+            a.status::text AS status, a.observacoes, ${valorServicoSql} AS valor_estimado,
+            at.id AS atendimento_id, at.valor_cobrado, at.forma_pagamento, at.data_hora_conclusao::text AS data_hora_conclusao
        FROM agendamento a
        JOIN pet p ON p.id = a.pet_id
        JOIN cliente c ON c.id = p.cliente_id
        JOIN servico s ON s.id = a.servico_id
+       LEFT JOIN atendimento at ON at.agendamento_id = a.id
        ${where}
       ORDER BY a.data DESC, a.hora ASC`,
     params
@@ -227,7 +363,63 @@ async function financeiroData() {
   };
 }
 
-async function aiContext() {
+async function safeAiQueries(question) {
+  const text = question.toLowerCase();
+  const results = {};
+
+  if (text.includes('cliente') || text.includes('tutor')) {
+    results.clientes = (await query(
+      `SELECT c.id, c.nome, c.telefone, c.tipo::text AS tipo, COUNT(p.id)::int AS pets
+         FROM cliente c
+         LEFT JOIN pet p ON p.cliente_id = c.id
+        GROUP BY c.id
+        ORDER BY c.nome
+        LIMIT 50`
+    )).rows;
+  }
+
+  if (text.includes('pet') || text.includes('animal') || text.includes('historico')) {
+    results.pets = (await query(
+      `SELECT p.id, p.nome, p.especie, p.raca, p.porte::text AS porte, c.nome AS cliente
+         FROM pet p
+         JOIN cliente c ON c.id = p.cliente_id
+        ORDER BY p.nome
+        LIMIT 50`
+    )).rows;
+  }
+
+  if (text.includes('agenda') || text.includes('agendamento') || text.includes('horario')) {
+    results.agendamentos = (await query(
+      `SELECT a.id, a.data::text AS data, a.hora::text AS hora, a.status::text AS status, p.nome AS pet, c.nome AS cliente, s.nome AS servico
+         FROM agendamento a
+         JOIN pet p ON p.id = a.pet_id
+         JOIN cliente c ON c.id = p.cliente_id
+         JOIN servico s ON s.id = a.servico_id
+        ORDER BY a.data DESC, a.hora DESC
+        LIMIT 50`
+    )).rows;
+  }
+
+  if (text.includes('servico') || text.includes('preco') || text.includes('duracao')) {
+    results.servicos = (await query('SELECT id, nome, descricao, preco_pequeno, preco_medio, preco_grande, duracao_pequeno, duracao_medio, duracao_grande FROM servico ORDER BY nome LIMIT 50')).rows;
+  }
+
+  if (text.includes('financeiro') || text.includes('fatur') || text.includes('receita') || text.includes('lucro') || text.includes('pagamento')) {
+    results.atendimentos = (await query(
+      `SELECT at.id, at.valor_cobrado, at.forma_pagamento, at.data_hora_conclusao::text AS conclusao, p.nome AS pet, s.nome AS servico
+         FROM atendimento at
+         JOIN agendamento a ON a.id = at.agendamento_id
+         JOIN pet p ON p.id = a.pet_id
+         JOIN servico s ON s.id = a.servico_id
+        ORDER BY at.data_hora_conclusao DESC
+        LIMIT 50`
+    )).rows;
+  }
+
+  return results;
+}
+
+async function aiContext(question = '') {
   const [dashboard, financeiro, clientes, agendamentos, servicos] = await Promise.all([
     dashboardData(),
     financeiroData(),
@@ -243,7 +435,8 @@ async function aiContext() {
     financeiro: financeiro.resumo,
     clientes: clientes.slice(0, 20),
     ultimos_agendamentos: agendamentos.slice(0, 20),
-    servicos: servicos.rows
+    servicos: servicos.rows,
+    consultas_seguras: await safeAiQueries(question)
   };
 }
 
@@ -265,6 +458,23 @@ function localAiFallback(question, context) {
 
   if (text.includes('fatur') || text.includes('receita') || text.includes('financeiro') || text.includes('lucro')) {
     return `Financeiro estimado: R$ ${financeiro.receitas.toFixed(2)} em receitas, R$ ${financeiro.despesas.toFixed(2)} em despesas, lucro de R$ ${financeiro.lucro.toFixed(2)} e R$ ${financeiro.aberto.toFixed(2)} em aberto.`;
+  }
+
+  if (text.includes('servico') || text.includes('serviço') || text.includes('preco') || text.includes('preço')) {
+    return context.servicos.length
+      ? `Servicos cadastrados: ${context.servicos.map((s) => `${s.nome} (P R$ ${toMoney(s.preco_pequeno).toFixed(2)}, M R$ ${toMoney(s.preco_medio).toFixed(2)}, G R$ ${toMoney(s.preco_grande).toFixed(2)})`).join('; ')}.`
+      : 'Nao ha servicos cadastrados no banco conectado.';
+  }
+
+  if (text.includes('pet') || text.includes('animal')) {
+    const pets = context.consultas_seguras.pets || context.clientes.map((cliente) => ({ nome: cliente.pet_nome, cliente: cliente.nome, raca: cliente.raca }));
+    return pets.length
+      ? `Pets no contexto: ${pets.map((pet) => `${pet.nome} (${pet.raca || pet.especie || 'sem detalhes'}) - tutor ${pet.cliente}`).join('; ')}.`
+      : 'Nao encontrei pets no banco conectado.';
+  }
+
+  if (text.includes('relatorio') || text.includes('relatório')) {
+    return 'Os relatorios financeiros estao disponiveis na tela Financeiro nos botoes CSV e PDF. A API tambem oferece /api/relatorios/financeiro.csv e /api/relatorios/financeiro.pdf.';
   }
 
   if (text.includes('melhor') || text.includes('sugest')) {
@@ -320,17 +530,20 @@ app.post('/api/auth/login', asyncRoute(async (req, res) => {
   const usuario = required(req.body.usuario, 'usuario');
   const senha = required(req.body.senha, 'senha');
   const { rows } = await query(
-    `SELECT id, nome, usuario, perfil::text AS perfil
+    `SELECT id, nome, usuario, senha, perfil::text AS perfil
        FROM usuario
-      WHERE usuario = $1 AND senha = $2 AND ativo = true
+      WHERE usuario = $1 AND ativo = true
       LIMIT 1`,
-    [usuario, senha]
+    [usuario]
   );
-  if (!rows[0]) {
+  if (!rows[0] || !(await verifyPassword(senha, rows[0].senha, rows[0].id))) {
     return res.status(401).json({ error: 'Usuario ou senha invalidos.' });
   }
-  res.json({ user: rows[0] });
+  const { senha: _senha, ...user } = rows[0];
+  res.json({ user, token: signToken(user) });
 }));
+
+app.use('/api', requireAuth);
 
 app.get('/api/dashboard', asyncRoute(async (_req, res) => {
   res.json(await dashboardData());
@@ -418,9 +631,78 @@ app.get('/api/pets', asyncRoute(async (_req, res) => {
   res.json(rows);
 }));
 
+app.get('/api/pets/:id/historico', asyncRoute(async (req, res) => {
+  const petId = Number(req.params.id);
+  const [agenda, historico] = await Promise.all([
+    query(
+      `SELECT a.id, a.data::text AS data, a.hora::text AS hora, a.status::text AS status,
+              a.observacoes, s.nome AS servico_nome, at.valor_cobrado, at.forma_pagamento, at.data_hora_conclusao::text AS data_hora_conclusao
+         FROM agendamento a
+         JOIN servico s ON s.id = a.servico_id
+         LEFT JOIN atendimento at ON at.agendamento_id = a.id
+        WHERE a.pet_id = $1
+        ORDER BY a.data DESC, a.hora DESC`,
+      [petId]
+    ),
+    query('SELECT id, tipo, descricao, criado_em::text AS criado_em FROM historico_pet WHERE pet_id = $1 ORDER BY criado_em DESC', [petId])
+  ]);
+  res.json({ agendamentos: agenda.rows, historico: historico.rows });
+}));
+
 app.get('/api/servicos', asyncRoute(async (_req, res) => {
   const { rows } = await query('SELECT * FROM servico ORDER BY nome');
   res.json(rows);
+}));
+
+app.post('/api/servicos', asyncRoute(async (req, res) => {
+  const body = req.body;
+  const { rows } = await query(
+    `INSERT INTO servico (nome, descricao, preco_pequeno, preco_medio, preco_grande, duracao_pequeno, duracao_medio, duracao_grande)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING *`,
+    [
+      required(body.nome, 'nome'),
+      body.descricao || null,
+      validateMoney(body.preco_pequeno, 'preco_pequeno'),
+      validateMoney(body.preco_medio, 'preco_medio'),
+      validateMoney(body.preco_grande, 'preco_grande'),
+      Number(required(body.duracao_pequeno, 'duracao_pequeno')),
+      Number(required(body.duracao_medio, 'duracao_medio')),
+      Number(required(body.duracao_grande, 'duracao_grande'))
+    ]
+  );
+  res.status(201).json(rows[0]);
+}));
+
+app.put('/api/servicos/:id', asyncRoute(async (req, res) => {
+  const body = req.body;
+  const { rows } = await query(
+    `UPDATE servico
+        SET nome = $1, descricao = $2, preco_pequeno = $3, preco_medio = $4, preco_grande = $5,
+            duracao_pequeno = $6, duracao_medio = $7, duracao_grande = $8
+      WHERE id = $9
+      RETURNING *`,
+    [
+      required(body.nome, 'nome'),
+      body.descricao || null,
+      validateMoney(body.preco_pequeno, 'preco_pequeno'),
+      validateMoney(body.preco_medio, 'preco_medio'),
+      validateMoney(body.preco_grande, 'preco_grande'),
+      Number(required(body.duracao_pequeno, 'duracao_pequeno')),
+      Number(required(body.duracao_medio, 'duracao_medio')),
+      Number(required(body.duracao_grande, 'duracao_grande')),
+      req.params.id
+    ]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'Servico nao encontrado.' });
+  res.json(rows[0]);
+}));
+
+app.delete('/api/servicos/:id', asyncRoute(async (req, res) => {
+  const used = await query('SELECT id FROM agendamento WHERE servico_id = $1 LIMIT 1', [req.params.id]);
+  if (used.rows[0]) return res.status(409).json({ error: 'Servico ja possui agendamentos e nao pode ser excluido.' });
+  await query('DELETE FROM servico WHERE id = $1', [req.params.id]);
+  res.json({ ok: true });
 }));
 
 app.get('/api/agendamentos', asyncRoute(async (req, res) => {
@@ -429,23 +711,66 @@ app.get('/api/agendamentos', asyncRoute(async (req, res) => {
 
 app.post('/api/agendamentos', asyncRoute(async (req, res) => {
   const body = req.body;
+  const petId = Number(required(body.pet_id, 'pet_id'));
+  const servicoId = Number(required(body.servico_id, 'servico_id'));
+  const data = validateDate(body.data);
+  const hora = validateTime(body.hora);
+  const status = validateEnum(statusDb[body.status] || body.status || 'AGENDADO', ['AGENDADO', 'EM_ANDAMENTO', 'CONCLUIDO', 'CANCELADO'], 'status');
+  if (status !== 'CANCELADO') await assertNoScheduleConflict({ petId, servicoId, data, hora });
   const { rows } = await query(
     `INSERT INTO agendamento (pet_id, servico_id, data, hora, status, observacoes)
      VALUES ($1, $2, $3, $4, $5::status_agendamento, $6)
      RETURNING id`,
-    [required(body.pet_id, 'pet_id'), required(body.servico_id, 'servico_id'), required(body.data, 'data'), required(body.hora, 'hora'), statusDb[body.status] || 'AGENDADO', body.observacoes || null]
+    [petId, servicoId, data, hora, status, body.observacoes || null]
   );
   res.status(201).json({ id: rows[0].id });
 }));
 
 app.put('/api/agendamentos/:id', asyncRoute(async (req, res) => {
   const body = req.body;
+  const petId = Number(required(body.pet_id, 'pet_id'));
+  const servicoId = Number(required(body.servico_id, 'servico_id'));
+  const data = validateDate(body.data);
+  const hora = validateTime(body.hora);
+  const status = validateEnum(statusDb[body.status] || body.status || 'AGENDADO', ['AGENDADO', 'EM_ANDAMENTO', 'CONCLUIDO', 'CANCELADO'], 'status');
+  if (status !== 'CANCELADO') await assertNoScheduleConflict({ petId, servicoId, data, hora, excludeId: Number(req.params.id) });
   await query(
     `UPDATE agendamento
         SET pet_id = $1, servico_id = $2, data = $3, hora = $4, status = $5::status_agendamento, observacoes = $6
       WHERE id = $7`,
-    [required(body.pet_id, 'pet_id'), required(body.servico_id, 'servico_id'), required(body.data, 'data'), required(body.hora, 'hora'), statusDb[body.status] || 'AGENDADO', body.observacoes || null, req.params.id]
+    [petId, servicoId, data, hora, status, body.observacoes || null, req.params.id]
   );
+  res.json({ ok: true });
+}));
+
+app.post('/api/agendamentos/:id/concluir', asyncRoute(async (req, res) => {
+  const agendamentoId = Number(req.params.id);
+  const valor = validateMoney(req.body.valor_cobrado, 'valor_cobrado');
+  const forma = required(req.body.forma_pagamento, 'forma_pagamento');
+
+  await transaction(async (client) => {
+    const agendamento = await client.query('SELECT pet_id FROM agendamento WHERE id = $1', [agendamentoId]);
+    if (!agendamento.rows[0]) {
+      const error = new Error('Agendamento nao encontrado.');
+      error.status = 404;
+      throw error;
+    }
+
+    await client.query('UPDATE agendamento SET status = $1::status_agendamento WHERE id = $2', ['CONCLUIDO', agendamentoId]);
+    await client.query(
+      `INSERT INTO atendimento (agendamento_id, valor_cobrado, forma_pagamento, data_hora_conclusao)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (agendamento_id)
+       DO UPDATE SET valor_cobrado = EXCLUDED.valor_cobrado, forma_pagamento = EXCLUDED.forma_pagamento, data_hora_conclusao = NOW()`,
+      [agendamentoId, valor, forma]
+    );
+    await client.query(
+      `INSERT INTO historico_pet (pet_id, agendamento_id, tipo, descricao)
+       VALUES ($1, $2, 'ATENDIMENTO', $3)`,
+      [agendamento.rows[0].pet_id, agendamentoId, `Atendimento concluido. Pagamento: ${forma}. Valor: R$ ${valor.toFixed(2)}.`]
+    );
+  });
+
   res.json({ ok: true });
 }));
 
@@ -459,6 +784,38 @@ app.delete('/api/agendamentos/:id', asyncRoute(async (req, res) => {
 
 app.get('/api/financeiro', asyncRoute(async (_req, res) => {
   res.json(await financeiroData());
+}));
+
+app.get('/api/relatorios/financeiro.csv', asyncRoute(async (_req, res) => {
+  const financeiro = await financeiroData();
+  const rows = ['data,descricao,categoria,valor,status'];
+  for (const item of financeiro.lancamentos) {
+    rows.push([item.data, item.descricao, item.categoria, item.valor, item.status].map((value) => `"${String(value).replaceAll('"', '""')}"`).join(','));
+  }
+  res.header('Content-Type', 'text/csv; charset=utf-8');
+  res.header('Content-Disposition', 'attachment; filename="financeiro-snoutsync.csv"');
+  res.send(rows.join('\n'));
+}));
+
+app.get('/api/relatorios/financeiro.pdf', asyncRoute(async (_req, res) => {
+  const financeiro = await financeiroData();
+  const doc = new PDFDocument({ margin: 42 });
+  res.header('Content-Type', 'application/pdf');
+  res.header('Content-Disposition', 'attachment; filename="financeiro-snoutsync.pdf"');
+  doc.pipe(res);
+  doc.fontSize(20).text('Relatorio Financeiro - SnoutSync');
+  doc.moveDown();
+  doc.fontSize(12).text(`Receitas: R$ ${financeiro.resumo.receitas.toFixed(2)}`);
+  doc.text(`Despesas: R$ ${financeiro.resumo.despesas.toFixed(2)}`);
+  doc.text(`Lucro: R$ ${financeiro.resumo.lucro.toFixed(2)}`);
+  doc.text(`Em aberto: R$ ${financeiro.resumo.aberto.toFixed(2)}`);
+  doc.moveDown();
+  doc.fontSize(14).text('Lancamentos');
+  doc.moveDown(0.5);
+  financeiro.lancamentos.forEach((item) => {
+    doc.fontSize(10).text(`${item.data} | ${item.descricao} | R$ ${Number(item.valor).toFixed(2)} | ${item.status}`);
+  });
+  doc.end();
 }));
 
 app.get('/api/ai/status', (_req, res) => {
@@ -475,7 +832,7 @@ app.post('/api/ai/ask', asyncRoute(async (req, res) => {
     return res.status(400).json({ error: 'Envie uma pergunta.' });
   }
 
-  const context = await aiContext();
+  const context = await aiContext(question);
   let aiWarning = null;
   let modelAnswer = null;
   try {
@@ -508,6 +865,13 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 
-app.listen(port, () => {
-  console.log(`SnoutSync API rodando em http://localhost:${port}`);
-});
+ensureSupportTables()
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`SnoutSync API rodando em http://localhost:${port}`);
+    });
+  })
+  .catch((error) => {
+    console.error('Nao foi possivel preparar o banco:', error);
+    process.exit(1);
+  });

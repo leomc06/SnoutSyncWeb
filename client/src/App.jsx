@@ -5,6 +5,7 @@ const pages = [
   ['dashboard', 'Dashboard'],
   ['clientes', 'Clientes e Pets'],
   ['agendamentos', 'Agendamentos'],
+  ['servicos', 'Servicos'],
   ['financeiro', 'Financeiro'],
   ['ia', 'IA e Consultas']
 ];
@@ -29,6 +30,17 @@ const emptySchedule = {
   observacoes: ''
 };
 
+const emptyService = {
+  nome: '',
+  descricao: '',
+  preco_pequeno: 0,
+  preco_medio: 0,
+  preco_grande: 0,
+  duracao_pequeno: 30,
+  duracao_medio: 45,
+  duracao_grande: 60
+};
+
 function storedUser() {
   try {
     const stored = localStorage.getItem('snoutsync:user');
@@ -41,6 +53,19 @@ function storedUser() {
 
 function currency(value) {
   return Number(value || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+}
+
+async function downloadReport(path, filename) {
+  const token = localStorage.getItem('snoutsync:token');
+  const response = await fetch(`${API_URL}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!response.ok) throw new Error('Nao foi possivel baixar o relatorio.');
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 function useApiData(path, deps = []) {
@@ -69,12 +94,14 @@ export default function App() {
   const [page, setPage] = useState('dashboard');
 
   function login(nextUser) {
-    localStorage.setItem('snoutsync:user', JSON.stringify(nextUser));
-    setUser(nextUser);
+    localStorage.setItem('snoutsync:user', JSON.stringify(nextUser.user));
+    localStorage.setItem('snoutsync:token', nextUser.token);
+    setUser(nextUser.user);
   }
 
   function logout() {
     localStorage.removeItem('snoutsync:user');
+    localStorage.removeItem('snoutsync:token');
     setUser(null);
   }
 
@@ -99,6 +126,7 @@ export default function App() {
         {page === 'dashboard' && <Dashboard go={setPage} />}
         {page === 'clientes' && <Clientes />}
         {page === 'agendamentos' && <Agendamentos />}
+        {page === 'servicos' && <Servicos />}
         {page === 'financeiro' && <Financeiro />}
         {page === 'ia' && <Assistant />}
       </main>
@@ -117,7 +145,7 @@ function Login({ onLogin }) {
     setError('');
     try {
       const data = await api('/auth/login', { method: 'POST', body: form });
-      onLogin(data.user);
+      onLogin(data);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -192,6 +220,7 @@ function Clientes() {
   const [search, setSearch] = useState('');
   const [reload, setReload] = useState(0);
   const [editing, setEditing] = useState(null);
+  const [historyPet, setHistoryPet] = useState(null);
   const { loading, error, data } = useApiData(`/clientes?search=${encodeURIComponent(search)}`, [search, reload]);
 
   async function remove(cliente) {
@@ -213,11 +242,12 @@ function Clientes() {
             <span>{item.pet_nome}<small>{item.raca || 'Raca nao informada'}</small></span>
             <span>{item.porte_label}</span>
             <Badge text={item.tipo_label} />
-            <span className="actions"><button onClick={() => setEditing(item)}>Editar</button><button onClick={() => remove(item)}>Excluir</button></span>
+            <span className="actions"><button onClick={() => setHistoryPet(item)}>Historico</button><button onClick={() => setEditing(item)}>Editar</button><button onClick={() => remove(item)}>Excluir</button></span>
           </div>
         )} />}
       </div>
       {editing && <ClientModal client={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); setReload((v) => v + 1); }} />}
+      {historyPet && <HistoryModal pet={historyPet} onClose={() => setHistoryPet(null)} />}
     </>
   );
 }
@@ -247,10 +277,87 @@ function ClientModal({ client, onClose, onSaved }) {
   </form></Modal>;
 }
 
+function HistoryModal({ pet, onClose }) {
+  const { loading, error, data } = useApiData(`/pets/${pet.pet_id}/historico`, [pet.pet_id]);
+
+  return <Modal title={`Historico de ${pet.pet_nome}`} onClose={onClose}>
+    {loading && <p>Carregando...</p>}
+    {error && <ErrorMessage message={error} />}
+    {data && <div className="history-list">
+      <h3>Atendimentos e agendamentos</h3>
+      <Rows rows={data.agendamentos} empty="Sem historico de agendamentos" render={(item) => (
+        <div className="history-item" key={`a-${item.id}`}><strong>{item.servico_nome}</strong><span>{new Date(`${item.data}T00:00:00`).toLocaleDateString('pt-BR')} as {item.hora} - {item.status}</span><small>{item.forma_pagamento ? `${item.forma_pagamento} - ${currency(item.valor_cobrado)}` : item.observacoes || 'Sem observacoes'}</small></div>
+      )} />
+      <h3>Notas</h3>
+      <Rows rows={data.historico} empty="Sem notas adicionais" render={(item) => (
+        <div className="history-item" key={`h-${item.id}`}><strong>{item.tipo}</strong><span>{new Date(item.criado_em).toLocaleString('pt-BR')}</span><small>{item.descricao}</small></div>
+      )} />
+    </div>}
+  </Modal>;
+}
+
+function Servicos() {
+  const [reload, setReload] = useState(0);
+  const [editing, setEditing] = useState(null);
+  const { loading, error, data } = useApiData('/servicos', [reload]);
+
+  async function remove(servico) {
+    if (!confirm(`Excluir o servico ${servico.nome}?`)) return;
+    await api(`/servicos/${servico.id}`, { method: 'DELETE' });
+    setReload((value) => value + 1);
+  }
+
+  return <>
+    <Header title="Servicos" subtitle="Edite precos, duracao e catalogo de banho e tosa." action={<button className="primary" onClick={() => setEditing(emptyService)}>+ Novo Servico</button>} />
+    <div className="card table-card">
+      {loading && <p>Carregando...</p>}
+      {error && <ErrorMessage message={error} />}
+      {data && <Rows rows={data} empty="Nenhum servico cadastrado" render={(item) => (
+        <div className="table-row service-row" key={item.id}>
+          <span><strong>{item.nome}</strong><small>{item.descricao || 'Sem descricao'}</small></span>
+          <span>P {currency(item.preco_pequeno)}<small>{item.duracao_pequeno} min</small></span>
+          <span>M {currency(item.preco_medio)}<small>{item.duracao_medio} min</small></span>
+          <span>G {currency(item.preco_grande)}<small>{item.duracao_grande} min</small></span>
+          <span className="actions"><button onClick={() => setEditing(item)}>Editar</button><button onClick={() => remove(item)}>Excluir</button></span>
+        </div>
+      )} />}
+    </div>
+    {editing && <ServiceModal service={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); setReload((v) => v + 1); }} />}
+  </>;
+}
+
+function ServiceModal({ service, onClose, onSaved }) {
+  const [form, setForm] = useState({ ...emptyService, ...service });
+  const isEdit = Boolean(service.id);
+
+  async function submit(event) {
+    event.preventDefault();
+    await api(isEdit ? `/servicos/${service.id}` : '/servicos', { method: isEdit ? 'PUT' : 'POST', body: form });
+    onSaved();
+  }
+
+  function field(name, value) {
+    setForm({ ...form, [name]: value });
+  }
+
+  return <Modal title={isEdit ? 'Editar Servico' : 'Novo Servico'} onClose={onClose}><form className="form-grid" onSubmit={submit}>
+    <label>Nome<input required value={form.nome} onChange={(e) => field('nome', e.target.value)} /></label>
+    <label>Descricao<input value={form.descricao || ''} onChange={(e) => field('descricao', e.target.value)} /></label>
+    <label>Preco pequeno<input required type="number" step="0.01" value={form.preco_pequeno} onChange={(e) => field('preco_pequeno', e.target.value)} /></label>
+    <label>Duracao pequeno<input required type="number" value={form.duracao_pequeno} onChange={(e) => field('duracao_pequeno', e.target.value)} /></label>
+    <label>Preco medio<input required type="number" step="0.01" value={form.preco_medio} onChange={(e) => field('preco_medio', e.target.value)} /></label>
+    <label>Duracao medio<input required type="number" value={form.duracao_medio} onChange={(e) => field('duracao_medio', e.target.value)} /></label>
+    <label>Preco grande<input required type="number" step="0.01" value={form.preco_grande} onChange={(e) => field('preco_grande', e.target.value)} /></label>
+    <label>Duracao grande<input required type="number" value={form.duracao_grande} onChange={(e) => field('duracao_grande', e.target.value)} /></label>
+    <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Salvar</button></div>
+  </form></Modal>;
+}
+
 function Agendamentos() {
   const [filters, setFilters] = useState({ data: '', status: 'Todos', search: '' });
   const [reload, setReload] = useState(0);
   const [editing, setEditing] = useState(null);
+  const [closing, setClosing] = useState(null);
   const query = new URLSearchParams(Object.fromEntries(Object.entries(filters).filter(([, value]) => value))).toString();
   const { loading, error, data } = useApiData(`/agendamentos?${query}`, [query, reload]);
   const refs = useRefs(reload);
@@ -277,13 +384,14 @@ function Agendamentos() {
           <div className="table-row schedule" key={item.id}>
             <span><strong>{item.hora}</strong><small>{new Date(`${item.data}T00:00:00`).toLocaleDateString('pt-BR')}</small></span>
             <span>{item.pet_nome}<small>{item.cliente_nome}</small></span>
-            <span>{item.servico_nome}<small>{currency(item.valor_estimado)}</small></span>
+            <span>{item.servico_nome}<small>{currency(item.valor_cobrado ?? item.valor_estimado)}</small></span>
             <Badge text={item.status_label} />
-            <span className="actions"><button onClick={() => setEditing(item)}>Editar</button><button onClick={() => remove(item)}>Excluir</button></span>
+            <span className="actions"><button onClick={() => setClosing(item)}>Concluir</button><button onClick={() => setEditing(item)}>Editar</button><button onClick={() => remove(item)}>Excluir</button></span>
           </div>
         )} />}
       </div>
       {editing && <ScheduleModal schedule={editing} refs={refs} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); setReload((v) => v + 1); }} />}
+      {closing && <CheckoutModal schedule={closing} onClose={() => setClosing(null)} onSaved={() => { setClosing(null); setReload((v) => v + 1); }} />}
     </>
   );
 }
@@ -315,6 +423,22 @@ function ScheduleModal({ schedule, refs, onClose, onSaved }) {
   </form></Modal>;
 }
 
+function CheckoutModal({ schedule, onClose, onSaved }) {
+  const [form, setForm] = useState({ valor_cobrado: schedule.valor_cobrado ?? schedule.valor_estimado, forma_pagamento: schedule.forma_pagamento || 'Pix' });
+
+  async function submit(event) {
+    event.preventDefault();
+    await api(`/agendamentos/${schedule.id}/concluir`, { method: 'POST', body: form });
+    onSaved();
+  }
+
+  return <Modal title={`Concluir ${schedule.pet_nome}`} onClose={onClose}><form className="form-grid" onSubmit={submit}>
+    <label>Valor cobrado<input required type="number" step="0.01" value={form.valor_cobrado} onChange={(e) => setForm({ ...form, valor_cobrado: e.target.value })} /></label>
+    <label>Forma de pagamento<select value={form.forma_pagamento} onChange={(e) => setForm({ ...form, forma_pagamento: e.target.value })}><option>Pix</option><option>Cartao</option><option>Dinheiro</option><option>Plano mensal</option></select></label>
+    <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Registrar pagamento</button></div>
+  </form></Modal>;
+}
+
 function Financeiro() {
   const { loading, error, data } = useApiData('/financeiro', []);
   if (loading) return <Loading title="Financeiro" />;
@@ -330,7 +454,7 @@ function Financeiro() {
         <Metric label="Em aberto" value={currency(data.resumo.aberto)} hint="Pendentes" />
       </section>
       <div className="card table-card">
-        <div className="card-title"><h3>Lancamentos</h3><button onClick={() => window.print()}>Relatorio</button></div>
+        <div className="card-title"><h3>Lancamentos</h3><span className="actions"><button onClick={() => downloadReport('/relatorios/financeiro.csv', 'financeiro-snoutsync.csv')}>CSV</button><button onClick={() => downloadReport('/relatorios/financeiro.pdf', 'financeiro-snoutsync.pdf')}>PDF</button></span></div>
         <Rows rows={data.lancamentos} empty="Nenhum lancamento" render={(item) => (
           <div className="table-row" key={item.id}><span>{new Date(`${item.data}T00:00:00`).toLocaleDateString('pt-BR')}</span><span>{item.descricao}</span><span>{item.categoria}</span><strong>{currency(item.valor)}</strong><Badge text={item.status} /></div>
         )} />
