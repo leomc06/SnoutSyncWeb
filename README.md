@@ -9,7 +9,7 @@ Sistema web para pet shop baseado no projeto `github.com/leomc06/SnoutSync-atual
 - CRUD de clientes e pets usando `cliente`, `pet` e `plano`.
 - CRUD de agendamentos usando `agendamento`, `pet` e `servico`.
 - Financeiro com receitas, despesas estimadas, lucro e lançamentos.
-- IA analítica em `/api/ai/ask`, respondendo com consultas no PostgreSQL conectado.
+- IA em `/api/ai/ask`, respondendo perguntas gerais quando houver LLM configurada e usando contexto do PostgreSQL conectado.
 
 ## Rodar o sistema
 
@@ -32,3 +32,17 @@ Também existe o usuário `atendente` com a mesma senha `TROCAR_SENHA`.
 ## Banco
 
 A API usa `DATABASE_URL` do arquivo `.env` na raiz. O mesmo `.env` continua servindo ao MCP PostgreSQL configurado no `opencode.json`, então a IA do servidor pode continuar consultando o banco conectado.
+
+## IA
+
+Sem chave de IA, o sistema usa um fallback local limitado a perguntas sobre clientes, agenda, financeiro e melhorias.
+
+Para responder perguntas abertas, configure uma API OpenAI-compatível no `.env`:
+
+```env
+AI_API_KEY=sua_chave
+AI_MODEL=gpt-5.5
+AI_BASE_URL=https://api.openai.com/v1
+```
+
+A rota `/api/ai/ask` envia para a LLM um resumo seguro do PostgreSQL conectado: métricas, financeiro, clientes, serviços e últimos agendamentos. Ela não executa SQL livre gerado pela IA.

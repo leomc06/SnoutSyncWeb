@@ -227,6 +227,90 @@ async function financeiroData() {
   };
 }
 
+async function aiContext() {
+  const [dashboard, financeiro, clientes, agendamentos, servicos] = await Promise.all([
+    dashboardData(),
+    financeiroData(),
+    listClientes(''),
+    listAgendamentos({}),
+    query('SELECT id, nome, descricao, preco_pequeno, preco_medio, preco_grande, duracao_pequeno, duracao_medio, duracao_grande FROM servico ORDER BY nome')
+  ]);
+
+  return {
+    gerado_em: new Date().toISOString(),
+    dashboard: dashboard.metrics,
+    agendamentos_hoje: dashboard.agendamentos_hoje,
+    financeiro: financeiro.resumo,
+    clientes: clientes.slice(0, 20),
+    ultimos_agendamentos: agendamentos.slice(0, 20),
+    servicos: servicos.rows
+  };
+}
+
+function localAiFallback(question, context) {
+  const text = question.toLowerCase();
+  const metrics = context.dashboard;
+  const financeiro = context.financeiro;
+
+  if (text.includes('cliente')) {
+    const planos = context.clientes.filter((cliente) => cliente.tipo === 'PLANO').length;
+    return `Existem ${context.clientes.length} cadastro(s) de cliente/pet no contexto carregado. ${planos} estao em plano e ${context.clientes.length - planos} estao como avulso.`;
+  }
+
+  if (text.includes('agenda') || text.includes('hoje')) {
+    return context.agendamentos_hoje.length
+      ? `Hoje ha ${context.agendamentos_hoje.length} agendamento(s): ${context.agendamentos_hoje.map((a) => `${a.hora} ${a.pet_nome} (${a.servico_nome})`).join('; ')}.`
+      : 'Nao ha agendamentos para hoje no banco conectado.';
+  }
+
+  if (text.includes('fatur') || text.includes('receita') || text.includes('financeiro') || text.includes('lucro')) {
+    return `Financeiro estimado: R$ ${financeiro.receitas.toFixed(2)} em receitas, R$ ${financeiro.despesas.toFixed(2)} em despesas, lucro de R$ ${financeiro.lucro.toFixed(2)} e R$ ${financeiro.aberto.toFixed(2)} em aberto.`;
+  }
+
+  if (text.includes('melhor') || text.includes('sugest')) {
+    return 'Sugestoes: usar senhas com hash, criar calendario visual, registrar pagamentos reais, acompanhar historico de cada pet, enviar lembretes por WhatsApp e transformar clientes avulsos recorrentes em planos.';
+  }
+
+  return `Ainda estou em modo local, sem chave de IA configurada. Posso responder melhor sobre dados do SnoutSync: ${metrics.clientes} clientes, ${metrics.agendamentos_hoje} agendamentos hoje, ${metrics.servicos_realizados} servicos realizados e faturamento estimado de R$ ${toMoney(metrics.faturamento_mes).toFixed(2)}. Para responder qualquer tipo de pergunta, configure AI_API_KEY no .env.`;
+}
+
+async function askLanguageModel(question, context) {
+  const apiKey = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+
+  const baseUrl = (process.env.AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
+  const model = process.env.AI_MODEL || 'gpt-5.5';
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: 'system',
+          content: 'Voce e a IA do SnoutSync, um sistema web de pet shop. Responda em portugues do Brasil, de forma objetiva e util. Voce pode responder perguntas gerais, mas quando a pergunta for sobre o negocio use somente o contexto JSON fornecido. Nao invente dados do banco. Se faltarem dados, diga exatamente o que falta.'
+        },
+        {
+          role: 'system',
+          content: `Contexto atual do PostgreSQL conectado:\n${JSON.stringify(context, null, 2)}`
+        },
+        { role: 'user', content: question }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Falha na IA configurada: ${response.status} ${errorText}`);
+  }
+
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content?.trim() || null;
+}
+
 app.get('/api/health', asyncRoute(async (_req, res) => {
   const { rows } = await query('SELECT current_database() AS database, current_user AS user, NOW() AS now');
   res.json({ ok: true, postgres: rows[0] });
@@ -377,26 +461,37 @@ app.get('/api/financeiro', asyncRoute(async (_req, res) => {
   res.json(await financeiroData());
 }));
 
-app.post('/api/ai/ask', asyncRoute(async (req, res) => {
-  const question = String(req.body.question || '').toLowerCase();
-  const dashboard = await dashboardData();
-  const financeiro = await financeiroData();
-  let answer = `Resumo atual: ${dashboard.metrics.clientes} clientes, ${dashboard.metrics.agendamentos_hoje} agendamentos hoje e faturamento estimado de R$ ${toMoney(dashboard.metrics.faturamento_mes).toFixed(2)}.`;
+app.get('/api/ai/status', (_req, res) => {
+  res.json({
+    configured: Boolean(process.env.AI_API_KEY || process.env.OPENAI_API_KEY),
+    model: process.env.AI_MODEL || 'gpt-5.5',
+    baseUrl: process.env.AI_BASE_URL || 'https://api.openai.com/v1'
+  });
+});
 
-  if (question.includes('cliente')) {
-    const clientes = await listClientes('');
-    answer = `Existem ${clientes.length} cadastro(s) de cliente/pet. Clientes de plano: ${clientes.filter((c) => c.tipo === 'PLANO').length}.`;
-  } else if (question.includes('agenda') || question.includes('hoje')) {
-    answer = dashboard.agendamentos_hoje.length
-      ? `Hoje ha ${dashboard.agendamentos_hoje.length} agendamento(s): ${dashboard.agendamentos_hoje.map((a) => `${a.hora} ${a.pet_nome} (${a.servico_nome})`).join('; ')}.`
-      : 'Nao ha agendamentos para hoje.';
-  } else if (question.includes('fatur') || question.includes('receita') || question.includes('financeiro')) {
-    answer = `Financeiro estimado: R$ ${financeiro.resumo.receitas.toFixed(2)} em receitas, R$ ${financeiro.resumo.despesas.toFixed(2)} em despesas, lucro de R$ ${financeiro.resumo.lucro.toFixed(2)} e R$ ${financeiro.resumo.aberto.toFixed(2)} em aberto.`;
-  } else if (question.includes('melhor') || question.includes('sugest')) {
-    answer = 'Sugestoes: confirmar agendamentos pendentes, reduzir janelas vazias na agenda, incentivar clientes avulsos a migrarem para plano e registrar atendimento/pagamento ao concluir cada servico.';
+app.post('/api/ai/ask', asyncRoute(async (req, res) => {
+  const question = String(req.body.question || '').trim();
+  if (!question) {
+    return res.status(400).json({ error: 'Envie uma pergunta.' });
   }
 
-  res.json({ answer, source: 'Consulta analitica no PostgreSQL conectado' });
+  const context = await aiContext();
+  let aiWarning = null;
+  let modelAnswer = null;
+  try {
+    modelAnswer = await askLanguageModel(question, context);
+  } catch (error) {
+    aiWarning = error.message;
+  }
+  const answer = modelAnswer || localAiFallback(question, context);
+
+  res.json({
+    answer,
+    source: modelAnswer ? 'LLM configurada com contexto do PostgreSQL conectado' : 'Fallback local com contexto do PostgreSQL conectado',
+    aiConfigured: Boolean(process.env.AI_API_KEY || process.env.OPENAI_API_KEY),
+    aiUsed: Boolean(modelAnswer),
+    warning: aiWarning
+  });
 }));
 
 app.use((req, res) => {
