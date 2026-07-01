@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { api, API_URL, clearSession, saveSession } from './api.js';
+import { api, API_URL, clearSession, saveSession, uploadApi } from './api.js';
 import { Badge, ErrorMessage, FieldError, Header, Loading, Metric, MiniBars, Modal, Rows, Skeleton, ToastStack } from './components/ui.jsx';
 
 const pages = [
   ['dashboard', 'Dashboard'],
   ['clientes', 'Clientes e Pets'],
   ['agendamentos', 'Agendamentos'],
+  ['profissionais', 'Profissionais'],
   ['servicos', 'Servicos'],
   ['despesas', 'Despesas'],
   ['estoque', 'Estoque'],
@@ -28,9 +29,22 @@ const emptyClient = {
 const emptySchedule = {
   pet_id: '',
   servico_id: '',
+  profissional_id: '',
   data: new Date().toISOString().slice(0, 10),
   hora: '10:00',
   status: 'AGENDADO',
+  observacoes: ''
+};
+
+const emptyProfessional = {
+  nome: '',
+  documento: '',
+  telefone: '',
+  email: '',
+  cargo: 'BANHISTA',
+  especialidade: '',
+  horario_inicio: '08:00',
+  horario_fim: '18:00',
   observacoes: ''
 };
 
@@ -168,6 +182,7 @@ export default function App() {
         {page === 'dashboard' && <Dashboard go={setPage} />}
         {page === 'clientes' && <Clientes notify={notify} />}
         {page === 'agendamentos' && <Agendamentos notify={notify} />}
+        {page === 'profissionais' && <Profissionais notify={notify} />}
         {page === 'servicos' && <Servicos notify={notify} />}
         {page === 'despesas' && <Despesas notify={notify} />}
         {page === 'estoque' && <Estoque notify={notify} />}
@@ -371,17 +386,29 @@ function HistoryModal({ pet, onClose }) {
   const [reload, setReload] = useState(0);
   const [editingRecord, setEditingRecord] = useState(false);
   const [addingVaccine, setAddingVaccine] = useState(false);
+  const [addingMedication, setAddingMedication] = useState(false);
+  const [addingAlert, setAddingAlert] = useState(false);
+  const [addingAttachment, setAddingAttachment] = useState(false);
   const record = useApiData(`/pets/${pet.pet_id}/prontuario`, [pet.pet_id, reload]);
 
   return <Modal title={`Historico de ${pet.pet_nome}`} onClose={onClose}>
     {loading && <p>Carregando...</p>}
     {error && <ErrorMessage message={error} />}
     {data && <div className="history-list">
-      <div className="card-title"><h3>Prontuario</h3><span className="actions"><button onClick={() => setEditingRecord(true)}>Editar prontuario</button><button onClick={() => setAddingVaccine(true)}>Nova vacina</button></span></div>
+      <div className="card-title"><h3>Prontuario</h3><span className="actions"><button onClick={() => setEditingRecord(true)}>Editar</button><button onClick={() => setAddingVaccine(true)}>Vacina</button><button onClick={() => setAddingMedication(true)}>Medicacao</button><button onClick={() => setAddingAlert(true)}>Alerta</button><button onClick={() => setAddingAttachment(true)}>Anexo</button></span></div>
       {record.loading && <Skeleton rows={2} />}
       {record.data && <div className="history-item"><strong>Dados clinicos</strong><span>Alergias: {record.data.prontuario?.alergias || 'Nao informado'}</span><small>Restricoes: {record.data.prontuario?.restricoes || 'Nao informado'} | Comportamento: {record.data.prontuario?.comportamento || 'Nao informado'}</small></div>}
+      {record.data && <Rows rows={record.data.alertas} empty="Sem alertas ativos" render={(item) => (
+        <div className="history-item" key={`al-${item.id}`}><strong>{item.titulo}</strong><span>{item.tipo} | {item.severidade}</span><small>{item.descricao || 'Sem descricao'}</small></div>
+      )} />}
+      {record.data && <Rows rows={record.data.medicacoes} empty="Sem medicacoes ativas" render={(item) => (
+        <div className="history-item" key={`m-${item.id}`}><strong>{item.nome}</strong><span>{item.dosagem || 'Sem dosagem'} | {item.frequencia || 'Sem frequencia'}</span><small>{item.observacoes || 'Sem observacoes'}</small></div>
+      )} />}
       {record.data && <Rows rows={record.data.vacinas} empty="Sem vacinas cadastradas" render={(item) => (
         <div className="history-item" key={`v-${item.id}`}><strong>{item.nome}</strong><span>Aplicacao: {item.data_aplicacao || 'Sem data'} | Reforco: {item.data_reforco || 'Sem data'}</span><small>{item.observacoes || 'Sem observacoes'}</small></div>
+      )} />}
+      {record.data && <Rows rows={record.data.anexos} empty="Sem anexos" render={(item) => (
+        <div className="history-item" key={`an-${item.id}`}><strong>{item.nome_original}</strong><span><a href={`${API_URL.replace('/api', '')}${item.url}`} target="_blank" rel="noreferrer">Abrir anexo</a></span><small>{item.descricao || item.mime_type || 'Arquivo'}</small></div>
       )} />}
       <h3>Atendimentos e agendamentos</h3>
       <Rows rows={data.agendamentos} empty="Sem historico de agendamentos" render={(item) => (
@@ -394,6 +421,9 @@ function HistoryModal({ pet, onClose }) {
     </div>}
     {editingRecord && <ProntuarioModal petId={pet.pet_id} record={record.data?.prontuario} onClose={() => setEditingRecord(false)} onSaved={() => { setEditingRecord(false); setReload((value) => value + 1); }} />}
     {addingVaccine && <VaccineModal petId={pet.pet_id} onClose={() => setAddingVaccine(false)} onSaved={() => { setAddingVaccine(false); setReload((value) => value + 1); }} />}
+    {addingMedication && <MedicationModal petId={pet.pet_id} onClose={() => setAddingMedication(false)} onSaved={() => { setAddingMedication(false); setReload((value) => value + 1); }} />}
+    {addingAlert && <AlertModal petId={pet.pet_id} onClose={() => setAddingAlert(false)} onSaved={() => { setAddingAlert(false); setReload((value) => value + 1); }} />}
+    {addingAttachment && <AttachmentModal petId={pet.pet_id} onClose={() => setAddingAttachment(false)} onSaved={() => { setAddingAttachment(false); setReload((value) => value + 1); }} />}
   </Modal>;
 }
 
@@ -443,6 +473,146 @@ function VaccineModal({ petId, onClose, onSaved }) {
     <label>Aplicacao<input type="date" value={form.data_aplicacao} onChange={(e) => setForm({ ...form, data_aplicacao: e.target.value })} /></label>
     <label>Reforco<input type="date" value={form.data_reforco} onChange={(e) => setForm({ ...form, data_reforco: e.target.value })} /></label>
     <label className="wide">Observacoes<input value={form.observacoes} onChange={(e) => setForm({ ...form, observacoes: e.target.value })} /></label>
+    <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Salvar</button></div>
+  </form></Modal>;
+}
+
+function MedicationModal({ petId, onClose, onSaved }) {
+  const [form, setForm] = useState({ nome: '', dosagem: '', frequencia: '', data_inicio: '', data_fim: '', observacoes: '' });
+  const [errors, setErrors] = useState({ message: '', fields: {} });
+  async function submit(event) {
+    event.preventDefault();
+    try {
+      await api(`/pets/${petId}/medicacoes`, { method: 'POST', body: form });
+      onSaved();
+    } catch (error) {
+      setErrors(formErrorState(error));
+    }
+  }
+  return <Modal title="Nova Medicacao" onClose={onClose}><form className="form-grid" onSubmit={submit}>
+    {errors.message && <div className="alert wide">{errors.message}</div>}
+    <label>Nome<input required value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} /><FieldError message={errors.fields.nome} /></label>
+    <label>Dosagem<input value={form.dosagem} onChange={(e) => setForm({ ...form, dosagem: e.target.value })} /></label>
+    <label>Frequencia<input value={form.frequencia} onChange={(e) => setForm({ ...form, frequencia: e.target.value })} /></label>
+    <label>Inicio<input type="date" value={form.data_inicio} onChange={(e) => setForm({ ...form, data_inicio: e.target.value })} /></label>
+    <label>Fim<input type="date" value={form.data_fim} onChange={(e) => setForm({ ...form, data_fim: e.target.value })} /></label>
+    <label className="wide">Observacoes<input value={form.observacoes} onChange={(e) => setForm({ ...form, observacoes: e.target.value })} /></label>
+    <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Salvar</button></div>
+  </form></Modal>;
+}
+
+function AlertModal({ petId, onClose, onSaved }) {
+  const [form, setForm] = useState({ tipo: 'GERAL', titulo: '', descricao: '', severidade: 'MEDIA' });
+  const [errors, setErrors] = useState({ message: '', fields: {} });
+  async function submit(event) {
+    event.preventDefault();
+    try {
+      await api(`/pets/${petId}/alertas`, { method: 'POST', body: form });
+      onSaved();
+    } catch (error) {
+      setErrors(formErrorState(error));
+    }
+  }
+  return <Modal title="Novo Alerta" onClose={onClose}><form className="form-grid" onSubmit={submit}>
+    {errors.message && <div className="alert wide">{errors.message}</div>}
+    <label>Titulo<input required value={form.titulo} onChange={(e) => setForm({ ...form, titulo: e.target.value })} /><FieldError message={errors.fields.titulo} /></label>
+    <label>Tipo<input value={form.tipo} onChange={(e) => setForm({ ...form, tipo: e.target.value })} /></label>
+    <label>Severidade<select value={form.severidade} onChange={(e) => setForm({ ...form, severidade: e.target.value })}><option>BAIXA</option><option>MEDIA</option><option>ALTA</option></select></label>
+    <label className="wide">Descricao<input value={form.descricao} onChange={(e) => setForm({ ...form, descricao: e.target.value })} /></label>
+    <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Salvar</button></div>
+  </form></Modal>;
+}
+
+function AttachmentModal({ petId, onClose, onSaved }) {
+  const [file, setFile] = useState(null);
+  const [descricao, setDescricao] = useState('');
+  const [error, setError] = useState('');
+  async function submit(event) {
+    event.preventDefault();
+    if (!file) return setError('Selecione um arquivo.');
+    const formData = new FormData();
+    formData.append('arquivo', file);
+    formData.append('descricao', descricao);
+    try {
+      await uploadApi(`/pets/${petId}/anexos`, formData);
+      onSaved();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+  return <Modal title="Novo Anexo" onClose={onClose}><form className="form-grid" onSubmit={submit}>
+    {error && <div className="alert wide">{error}</div>}
+    <label className="wide">Arquivo<input required type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} /></label>
+    <label className="wide">Descricao<input value={descricao} onChange={(e) => setDescricao(e.target.value)} /></label>
+    <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Enviar</button></div>
+  </form></Modal>;
+}
+
+function Profissionais({ notify }) {
+  const [reload, setReload] = useState(0);
+  const [editing, setEditing] = useState(null);
+  const { loading, error, data } = useApiData('/profissionais', [reload]);
+
+  async function remove(item) {
+    if (!confirm(`Inativar profissional ${item.nome}?`)) return;
+    try {
+      await api(`/profissionais/${item.id}`, { method: 'DELETE' });
+      notify('Profissional inativado com sucesso.', 'success');
+      setReload((value) => value + 1);
+    } catch (error) {
+      notify(error.message, 'error');
+    }
+  }
+
+  return <>
+    <Header title="Profissionais" subtitle="Banhistas, tosadores e equipe operacional." action={<button className="primary" onClick={() => setEditing(emptyProfessional)}>+ Novo Profissional</button>} />
+    <div className="card table-card">
+      {loading && <Skeleton rows={4} />}
+      {error && <ErrorMessage message={error} />}
+      {data && <Rows rows={data} empty="Nenhum profissional cadastrado" render={(item) => (
+        <div className="table-row" key={item.id}>
+          <span><strong>{item.nome}</strong><small>{item.cargo || 'BANHISTA'} | {item.especialidade || 'Sem especialidade'}</small></span>
+          <span>{item.telefone || 'Sem telefone'}<small>{item.email || 'Sem e-mail'}</small></span>
+          <span>{String(item.horario_inicio || '').slice(0, 5)} - {String(item.horario_fim || '').slice(0, 5)}</span>
+          <Badge text={item.loja_nome || 'Matriz'} />
+          <span className="actions"><button onClick={() => setEditing(item)}>Editar</button><button onClick={() => remove(item)}>Inativar</button></span>
+        </div>
+      )} />}
+    </div>
+    {editing && <ProfessionalModal professional={editing} onClose={() => setEditing(null)} onSaved={() => { notify('Profissional salvo com sucesso.', 'success'); setEditing(null); setReload((v) => v + 1); }} />}
+  </>;
+}
+
+function ProfessionalModal({ professional, onClose, onSaved }) {
+  const [form, setForm] = useState({ ...emptyProfessional, ...professional });
+  const [errors, setErrors] = useState({ message: '', fields: {} });
+  const isEdit = Boolean(professional.id);
+
+  async function submit(event) {
+    event.preventDefault();
+    try {
+      await api(isEdit ? `/profissionais/${professional.id}` : '/profissionais', { method: isEdit ? 'PUT' : 'POST', body: form });
+      onSaved();
+    } catch (error) {
+      setErrors(formErrorState(error));
+    }
+  }
+
+  function field(name, value) {
+    setForm({ ...form, [name]: value });
+  }
+
+  return <Modal title={isEdit ? 'Editar Profissional' : 'Novo Profissional'} onClose={onClose}><form className="form-grid" onSubmit={submit}>
+    {errors.message && <div className="alert wide">{errors.message}</div>}
+    <label>Nome<input required value={form.nome} onChange={(e) => field('nome', e.target.value)} /><FieldError message={errors.fields.nome} /></label>
+    <label>Documento<input value={form.documento || ''} onChange={(e) => field('documento', e.target.value)} /></label>
+    <label>Telefone<input value={form.telefone || ''} onChange={(e) => field('telefone', e.target.value)} /></label>
+    <label>E-mail<input type="email" value={form.email || ''} onChange={(e) => field('email', e.target.value)} /></label>
+    <label>Cargo<select value={form.cargo || 'BANHISTA'} onChange={(e) => field('cargo', e.target.value)}><option>BANHISTA</option><option>TOSADOR</option><option>VETERINARIO</option><option>ATENDENTE</option></select></label>
+    <label>Especialidade<input value={form.especialidade || ''} onChange={(e) => field('especialidade', e.target.value)} /></label>
+    <label>Inicio<input type="time" value={String(form.horario_inicio || '').slice(0, 5)} onChange={(e) => field('horario_inicio', e.target.value)} /></label>
+    <label>Fim<input type="time" value={String(form.horario_fim || '').slice(0, 5)} onChange={(e) => field('horario_fim', e.target.value)} /></label>
+    <label className="wide">Observacoes<input value={form.observacoes || ''} onChange={(e) => field('observacoes', e.target.value)} /></label>
     <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Salvar</button></div>
   </form></Modal>;
 }
@@ -542,6 +712,7 @@ function Agendamentos({ notify }) {
         body: {
           pet_id: item.pet_id,
           servico_id: item.servico_id,
+          profissional_id: item.profissional_id || '',
           data: nextDate,
           hora: item.hora,
           status: item.status,
@@ -572,7 +743,7 @@ function Agendamentos({ notify }) {
           <div className="table-row schedule" key={item.id}>
             <span><strong>{item.hora}</strong><small>{new Date(`${item.data}T00:00:00`).toLocaleDateString('pt-BR')}</small></span>
             <span>{item.pet_nome}<small>{item.cliente_nome}</small></span>
-            <span>{item.servico_nome}<small>{currency(item.valor_cobrado ?? item.valor_estimado)}</small></span>
+            <span>{item.servico_nome}<small>{item.profissional_nome} | {currency(item.valor_cobrado ?? item.valor_estimado)}</small></span>
             <Badge text={item.status_label} />
             <span className="actions"><button onClick={() => setClosing(item)}>Concluir</button><button onClick={() => setEditing(item)}>Editar</button><button onClick={() => remove(item)}>Excluir</button></span>
           </div>
@@ -616,7 +787,8 @@ function CalendarStrip({ items, onEdit, onMove }) {
 function useRefs(reload) {
   const pets = useApiData('/pets', [reload]);
   const servicos = useApiData('/servicos', [reload]);
-  return { pets: pets.data || [], servicos: servicos.data || [] };
+  const profissionais = useApiData('/profissionais', [reload]);
+  return { pets: pets.data || [], servicos: servicos.data || [], profissionais: profissionais.data || [] };
 }
 
 function ScheduleModal({ schedule, refs, onClose, onSaved }) {
@@ -638,6 +810,7 @@ function ScheduleModal({ schedule, refs, onClose, onSaved }) {
     {errors.message && <div className="alert wide">{errors.message}</div>}
     <label>Pet<select required value={form.pet_id} onChange={(e) => setForm({ ...form, pet_id: e.target.value })}><option value="">Selecione</option>{refs.pets.map((pet) => <option key={pet.id} value={pet.id}>{pet.nome} - {pet.cliente_nome}</option>)}</select><FieldError message={errors.fields.pet_id} /></label>
     <label>Servico<select required value={form.servico_id} onChange={(e) => setForm({ ...form, servico_id: e.target.value })}><option value="">Selecione</option>{refs.servicos.map((servico) => <option key={servico.id} value={servico.id}>{servico.nome}</option>)}</select><FieldError message={errors.fields.servico_id} /></label>
+    <label>Profissional<select required value={form.profissional_id || ''} onChange={(e) => setForm({ ...form, profissional_id: e.target.value })}><option value="">Selecione</option>{refs.profissionais.map((profissional) => <option key={profissional.id} value={profissional.id}>{profissional.nome}</option>)}</select><FieldError message={errors.fields.profissional_id} /></label>
     <label>Data<input required type="date" value={form.data} onChange={(e) => setForm({ ...form, data: e.target.value })} /><FieldError message={errors.fields.data} /></label>
     <label>Hora<input required type="time" value={form.hora} onChange={(e) => setForm({ ...form, hora: e.target.value })} /><FieldError message={errors.fields.hora} /></label>
     <label>Status<select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}><option value="AGENDADO">Confirmado</option><option value="EM_ANDAMENTO">Pendente</option><option value="CONCLUIDO">Concluido</option><option value="CANCELADO">Cancelado</option></select></label>

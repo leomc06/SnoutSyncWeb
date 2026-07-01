@@ -37,6 +37,9 @@ Sistema web full stack para gestao de pet shops, banho e tosa, evoluido para uma
 - Painel BI com sazonalidade mensal, top servicos e previsao simples por media historica.
 - Multiempresa preparada no banco com tabela `empresa` e `empresa_id` nas entidades principais.
 - Notificacoes por e-mail e WhatsApp via webhooks configuraveis.
+- Planos SaaS `FILHOTE`, `ADULTO` e `ALPHA` com limites operacionais.
+- Lojas por empresa, telefones multiplos e profissionais/banhistas vinculados a agenda.
+- Upload real de anexos/fotos no prontuario usando armazenamento local configuravel.
 - IA em `/api/ai/ask`, com contexto seguro do PostgreSQL.
 - UX com busca global, toasts, skeleton loading, erros por campo e calendario com drag-and-drop persistente entre dias visiveis.
 
@@ -109,6 +112,16 @@ AI_MODEL=gpt-5.5
 AI_BASE_URL=https://api.openai.com/v1
 EMAIL_WEBHOOK_URL=
 WHATSAPP_WEBHOOK_URL=
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=
+SMTP_PASS=
+SMTP_FROM=
+EVOLUTION_API_URL=
+EVOLUTION_API_KEY=
+EVOLUTION_INSTANCE=
+UPLOAD_DIR=uploads
 ```
 
 Em producao, configure obrigatoriamente `DATABASE_URL`, `JWT_SECRET`, `NODE_ENV=production`, `CORS_ORIGIN` e HTTPS no proxy/reverse proxy.
@@ -207,17 +220,30 @@ Rotas protegidas usam `Authorization: Bearer <access_token>`:
 
 - `POST /api/auth/logout`
 - `POST /api/auth/change-password`
+- `GET /api/admin/assinatura`
+- `PUT /api/admin/assinatura`
+- `GET /api/lojas`
+- `POST /api/lojas`
 - `GET /api/dashboard`
 - `GET /api/clientes`
 - `POST /api/clientes`
 - `PUT /api/clientes/:clienteId/pets/:petId`
 - `DELETE /api/clientes/:clienteId`
+- `GET /api/clientes/:id/telefones`
+- `POST /api/clientes/:id/telefones`
 - `GET /api/pets`
 - `GET /api/pets/:id/historico`
 - `GET /api/pets/:id/prontuario`
 - `PUT /api/pets/:id/prontuario`
 - `POST /api/pets/:id/vacinas`
 - `DELETE /api/pets/:petId/vacinas/:vacinaId`
+- `POST /api/pets/:id/medicacoes`
+- `POST /api/pets/:id/alertas`
+- `POST /api/pets/:id/anexos`
+- `GET /api/profissionais`
+- `POST /api/profissionais`
+- `PUT /api/profissionais/:id`
+- `DELETE /api/profissionais/:id`
 - `GET /api/servicos`
 - `POST /api/servicos`
 - `PUT /api/servicos/:id`
@@ -252,7 +278,13 @@ Rotas administrativas:
 
 Rotas de escrita/destruicao em servicos, despesas, produtos e exclusoes sensiveis exigem perfil `ADMIN`.
 
-Notificacoes usam `EMAIL_WEBHOOK_URL` e `WHATSAPP_WEBHOOK_URL`. Quando nao configuradas, a API registra o payload em log para desenvolvimento local.
+Notificacoes usam SMTP (`SMTP_*`) para e-mail e Evolution API (`EVOLUTION_*`) para WhatsApp. `EMAIL_WEBHOOK_URL` e `WHATSAPP_WEBHOOK_URL` continuam como fallback. Quando nada esta configurado, a API registra o payload em log para desenvolvimento local.
+
+Planos SaaS:
+
+- `FILHOTE`: 1 loja, 2 usuarios e 200 agendamentos por mes.
+- `ADULTO`: 3 lojas, 10 usuarios e 2000 agendamentos por mes.
+- `ALPHA`: limites tecnicamente altos para uso premium.
 
 Resposta de sucesso:
 

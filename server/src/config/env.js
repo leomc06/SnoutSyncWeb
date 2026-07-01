@@ -34,6 +34,20 @@ export const env = {
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:5173',
   emailWebhookUrl: process.env.EMAIL_WEBHOOK_URL || '',
   whatsappWebhookUrl: process.env.WHATSAPP_WEBHOOK_URL || '',
+  smtp: {
+    host: process.env.SMTP_HOST || '',
+    port: numberEnv('SMTP_PORT', 587),
+    secure: process.env.SMTP_SECURE === 'true',
+    user: process.env.SMTP_USER || '',
+    pass: process.env.SMTP_PASS || '',
+    from: process.env.SMTP_FROM || process.env.SMTP_USER || ''
+  },
+  evolution: {
+    baseUrl: process.env.EVOLUTION_API_URL || '',
+    apiKey: process.env.EVOLUTION_API_KEY || '',
+    instance: process.env.EVOLUTION_INSTANCE || ''
+  },
+  uploadDir: process.env.UPLOAD_DIR || 'uploads',
   aiApiKey: process.env.AI_API_KEY || process.env.OPENAI_API_KEY || '',
   aiModel: process.env.AI_MODEL || 'gpt-5.5',
   aiBaseUrl: process.env.AI_BASE_URL || 'https://api.openai.com/v1'

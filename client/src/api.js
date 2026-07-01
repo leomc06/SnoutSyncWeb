@@ -58,4 +58,20 @@ export async function api(path, options = {}, retry = true) {
   return payload?.success ? payload.data : payload;
 }
 
+export async function uploadApi(path, formData) {
+  const token = localStorage.getItem('snoutsync:token');
+  const response = await fetch(`${API_URL}${path}`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error || 'Erro ao enviar arquivo.');
+    error.details = payload.details || null;
+    throw error;
+  }
+  return payload?.success ? payload.data : payload;
+}
+
 export { API_URL };

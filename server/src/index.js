@@ -1,18 +1,32 @@
 import express from 'express';
+import fs from 'node:fs';
+import path from 'node:path';
 import PDFDocument from 'pdfkit';
+import multer from 'multer';
 import { pool, query, transaction } from './db.js';
 import { env, assertProductionEnv } from './config/env.js';
 import { ensureSchema } from './database/ensureSchema.js';
 import { blacklistAccessToken, createPasswordResetToken, createRefreshToken, hashOpaqueToken, hashPassword, requireAuth, requireRole, revokeRefreshToken, revokeUserRefreshTokens, rotateRefreshToken, signToken, verifyPassword } from './middlewares/auth.js';
 import { errorHandler, notFoundHandler } from './middlewares/errors.js';
 import { apiRateLimit, authRateLimit, compressionMiddleware, corsMiddleware, requestId, securityHeaders } from './middlewares/security.js';
-import { asyncRoute, badRequest, conflict, created, notFound, ok, unauthorized } from './utils/http.js';
+import { asyncRoute, badRequest, conflict, created, forbidden, notFound, ok, unauthorized } from './utils/http.js';
 import { required, validateDate, validateEnum, validateMoney, validatePositiveInt, validateStrongPassword, validateTime } from './utils/validators.js';
 import { sendEmail, sendPasswordResetEmail, sendWhatsApp } from './services/email.js';
 import { audit } from './utils/audit.js';
 
 const app = express();
 assertProductionEnv();
+const uploadRoot = path.resolve(process.cwd(), env.uploadDir);
+const petUploadDir = path.join(uploadRoot, 'pets');
+fs.mkdirSync(petUploadDir, { recursive: true });
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, petUploadDir),
+    filename: (_req, file, cb) => cb(null, `${Date.now()}-${Math.random().toString(36).slice(2)}${path.extname(file.originalname || '')}`)
+  }),
+  limits: { fileSize: 8 * 1024 * 1024 }
+});
 
 app.set('trust proxy', 1);
 app.use(requestId);
@@ -20,6 +34,7 @@ app.use(securityHeaders);
 app.use(compressionMiddleware);
 app.use(corsMiddleware());
 app.use(apiRateLimit);
+app.use('/uploads', express.static(uploadRoot));
 app.use(express.json({ limit: '1mb' }));
 
 app.get('/', (_req, res) => {
@@ -91,6 +106,38 @@ async function notifySchedule(req, agendamentoId, action) {
   }
 }
 
+const planLimits = {
+  FILHOTE: { lojas: 1, usuarios: 2, agendamentosMes: 200 },
+  ADULTO: { lojas: 3, usuarios: 10, agendamentosMes: 2000 },
+  ALPHA: { lojas: 999, usuarios: 999, agendamentosMes: 999999 }
+};
+
+async function activeSubscription(empresaIdValue) {
+  const { rows } = await query(
+    `SELECT plano, limite_lojas, limite_usuarios, limite_agendamentos_mes
+       FROM empresa_assinatura
+      WHERE empresa_id = $1 AND status = 'ATIVA'
+      ORDER BY id DESC
+      LIMIT 1`,
+    [empresaIdValue]
+  );
+  return rows[0] || { plano: 'FILHOTE', limite_lojas: 1, limite_usuarios: 2, limite_agendamentos_mes: 200 };
+}
+
+async function assertSubscriptionLimit(req, scheduleDate) {
+  const subscription = await activeSubscription(empresaId(req));
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS total
+       FROM agendamento
+      WHERE empresa_id = $1
+        AND date_trunc('month', data::timestamp) = date_trunc('month', $2::date::timestamp)`,
+    [empresaId(req), scheduleDate]
+  );
+  if (rows[0].total >= subscription.limite_agendamentos_mes) {
+    throw forbidden(`Limite mensal de agendamentos do plano ${subscription.plano} atingido.`);
+  }
+}
+
 function mapCliente(row) {
   return {
     cliente_id: row.cliente_id,
@@ -117,6 +164,8 @@ function mapAgendamento(row) {
     cliente_nome: row.cliente_nome,
     pet_nome: row.pet_nome,
     servico_nome: row.servico_nome,
+    profissional_id: row.profissional_id || null,
+    profissional_nome: row.profissional_nome || 'Sem profissional',
     data: row.data,
     hora: String(row.hora).slice(0, 5),
     status: row.status,
@@ -146,8 +195,8 @@ const duracaoServicoSql = `
   END
 `;
 
-async function assertNoScheduleConflict({ petId, servicoId, data, hora, excludeId = null }) {
-  const params = [petId, servicoId, data, hora, excludeId];
+async function assertNoScheduleConflict({ petId, servicoId, data, hora, profissionalId = null, excludeId = null }) {
+  const params = [petId, servicoId, data, hora, excludeId, profissionalId];
   const { rows } = await query(
     `WITH novo AS (
        SELECT ($3::date + $4::time) AS inicio,
@@ -163,8 +212,9 @@ async function assertNoScheduleConflict({ petId, servicoId, data, hora, excludeI
          JOIN pet p ON p.id = a.pet_id
          JOIN servico s ON s.id = a.servico_id
         WHERE a.data = $3::date
-          AND a.status <> 'CANCELADO'
-          AND ($5::int IS NULL OR a.id <> $5::int)
+           AND a.status <> 'CANCELADO'
+           AND ($5::int IS NULL OR a.id <> $5::int)
+           AND ($6::int IS NULL OR a.profissional_id = $6::int)
      )
      SELECT e.*
        FROM existentes e
@@ -175,7 +225,7 @@ async function assertNoScheduleConflict({ petId, servicoId, data, hora, excludeI
   );
 
   if (rows[0]) {
-    throw conflict(`Conflito de horario com ${rows[0].pet_nome} (${rows[0].servico_nome}).`, rows[0]);
+    throw conflict(`Conflito de horario com ${rows[0].pet_nome} (${rows[0].servico_nome}) para este profissional.`, rows[0]);
   }
 }
 
@@ -230,7 +280,7 @@ async function listAgendamentos({ data, status, search, dataInicio, dataFim, ser
 
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   const { rows } = await query(
-    `SELECT a.id, a.pet_id, a.servico_id, p.cliente_id, c.nome AS cliente_nome,
+    `SELECT a.id, a.pet_id, a.servico_id, a.profissional_id, pr.nome AS profissional_nome, p.cliente_id, c.nome AS cliente_nome,
             p.nome AS pet_nome, s.nome AS servico_nome, a.data::text AS data, a.hora::text AS hora,
             a.status::text AS status, a.observacoes, ${valorServicoSql} AS valor_estimado,
             at.id AS atendimento_id, at.valor_cobrado, at.forma_pagamento, at.data_hora_conclusao::text AS data_hora_conclusao
@@ -238,6 +288,7 @@ async function listAgendamentos({ data, status, search, dataInicio, dataFim, ser
        JOIN pet p ON p.id = a.pet_id
        JOIN cliente c ON c.id = p.cliente_id
        JOIN servico s ON s.id = a.servico_id
+       LEFT JOIN profissional pr ON pr.id = a.profissional_id
        LEFT JOIN atendimento at ON at.agendamento_id = a.id
        ${where}
       ORDER BY a.data DESC, a.hora ASC`,
@@ -731,6 +782,123 @@ app.get('/api/admin/audit-logs', requireRole('ADMIN'), asyncRoute(async (req, re
   ok(res, rows);
 }));
 
+app.get('/api/admin/assinatura', requireRole('ADMIN', 'GERENTE'), asyncRoute(async (req, res) => {
+  ok(res, await activeSubscription(empresaId(req)));
+}));
+
+app.put('/api/admin/assinatura', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const plano = validateEnum(req.body.plano, ['FILHOTE', 'ADULTO', 'ALPHA'], 'plano');
+  const limits = planLimits[plano];
+  await transaction(async (client) => {
+    await client.query('UPDATE empresa_assinatura SET status = $1, updated_at = NOW() WHERE empresa_id = $2 AND status = $3', ['CANCELADA', empresaId(req), 'ATIVA']);
+    await client.query(
+      `INSERT INTO empresa_assinatura (empresa_id, plano, limite_lojas, limite_usuarios, limite_agendamentos_mes)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [empresaId(req), plano, limits.lojas, limits.usuarios, limits.agendamentosMes]
+    );
+  });
+  await audit(req, { action: 'assinatura.updated', entityType: 'empresa', entityId: empresaId(req), metadata: { plano } });
+  ok(res, await activeSubscription(empresaId(req)));
+}));
+
+app.get('/api/lojas', requireRole('ADMIN', 'GERENTE'), asyncRoute(async (req, res) => {
+  const { rows } = await query('SELECT * FROM loja WHERE empresa_id = $1 AND ativo = true ORDER BY nome', [empresaId(req)]);
+  ok(res, rows);
+}));
+
+app.post('/api/lojas', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const subscription = await activeSubscription(empresaId(req));
+  const current = await query('SELECT COUNT(*)::int AS total FROM loja WHERE empresa_id = $1 AND ativo = true', [empresaId(req)]);
+  if (current.rows[0].total >= subscription.limite_lojas) throw forbidden(`Limite de lojas do plano ${subscription.plano} atingido.`);
+  const { rows } = await query(
+    `INSERT INTO loja (empresa_id, nome, documento, email, endereco, created_by, updated_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $6)
+     RETURNING *`,
+    [empresaId(req), required(req.body.nome, 'nome'), req.body.documento || null, req.body.email || null, req.body.endereco || null, req.user.id]
+  );
+  await audit(req, { action: 'loja.created', entityType: 'loja', entityId: rows[0].id });
+  created(res, rows[0]);
+}));
+
+app.get('/api/profissionais', asyncRoute(async (req, res) => {
+  const { rows } = await query(
+    `SELECT p.*, l.nome AS loja_nome
+       FROM profissional p
+       LEFT JOIN loja l ON l.id = p.loja_id
+      WHERE p.empresa_id = $1 AND p.ativo = true
+      ORDER BY p.nome`,
+    [empresaId(req)]
+  );
+  ok(res, rows);
+}));
+
+app.post('/api/profissionais', requireRole('ADMIN', 'GERENTE'), asyncRoute(async (req, res) => {
+  const body = req.body;
+  const { rows } = await query(
+    `INSERT INTO profissional (empresa_id, loja_id, nome, documento, telefone, email, cargo, especialidade, especialidades, horario_inicio, horario_fim, dias_semana, observacoes, created_by, updated_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12::jsonb, $13, $14, $14)
+     RETURNING *`,
+    [
+      empresaId(req),
+      body.loja_id || req.user.loja_id || null,
+      required(body.nome, 'nome'),
+      body.documento || null,
+      body.telefone || null,
+      body.email || null,
+      body.cargo || 'BANHISTA',
+      body.especialidade || null,
+      JSON.stringify(body.especialidades || []),
+      body.horario_inicio || null,
+      body.horario_fim || null,
+      JSON.stringify(body.dias_semana || [1, 2, 3, 4, 5, 6]),
+      body.observacoes || null,
+      req.user.id
+    ]
+  );
+  await audit(req, { action: 'profissional.created', entityType: 'profissional', entityId: rows[0].id });
+  created(res, rows[0]);
+}));
+
+app.put('/api/profissionais/:id', requireRole('ADMIN', 'GERENTE'), asyncRoute(async (req, res) => {
+  const body = req.body;
+  const { rows } = await query(
+    `UPDATE profissional
+        SET loja_id = $1, nome = $2, documento = $3, telefone = $4, email = $5, cargo = $6,
+            especialidade = $7, especialidades = $8::jsonb, horario_inicio = $9, horario_fim = $10,
+            dias_semana = $11::jsonb, observacoes = $12, updated_at = NOW(), updated_by = $13
+      WHERE id = $14 AND empresa_id = $15 AND ativo = true
+      RETURNING *`,
+    [body.loja_id || null, required(body.nome, 'nome'), body.documento || null, body.telefone || null, body.email || null, body.cargo || 'BANHISTA', body.especialidade || null, JSON.stringify(body.especialidades || []), body.horario_inicio || null, body.horario_fim || null, JSON.stringify(body.dias_semana || [1, 2, 3, 4, 5, 6]), body.observacoes || null, req.user.id, req.params.id, empresaId(req)]
+  );
+  if (!rows[0]) throw notFound('Profissional nao encontrado.');
+  await audit(req, { action: 'profissional.updated', entityType: 'profissional', entityId: req.params.id });
+  ok(res, rows[0]);
+}));
+
+app.delete('/api/profissionais/:id', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const { rows } = await query('UPDATE profissional SET ativo = false, updated_at = NOW(), updated_by = $1 WHERE id = $2 AND empresa_id = $3 RETURNING id', [req.user.id, req.params.id, empresaId(req)]);
+  if (!rows[0]) throw notFound('Profissional nao encontrado.');
+  await audit(req, { action: 'profissional.deleted', entityType: 'profissional', entityId: req.params.id });
+  ok(res, { deleted: true });
+}));
+
+app.get('/api/clientes/:id/telefones', asyncRoute(async (req, res) => {
+  const { rows } = await query('SELECT * FROM cliente_telefone WHERE cliente_id = $1 ORDER BY principal DESC, id', [req.params.id]);
+  ok(res, rows);
+}));
+
+app.post('/api/clientes/:id/telefones', asyncRoute(async (req, res) => {
+  const { rows } = await query(
+    `INSERT INTO cliente_telefone (cliente_id, numero, tipo, principal, whatsapp)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING *`,
+    [req.params.id, required(req.body.numero, 'numero'), req.body.tipo || 'CELULAR', Boolean(req.body.principal), req.body.whatsapp !== false]
+  );
+  if (rows[0].principal) await query('UPDATE cliente SET telefone = $1 WHERE id = $2', [rows[0].numero, req.params.id]);
+  await audit(req, { action: 'cliente_telefone.created', entityType: 'cliente', entityId: req.params.id });
+  created(res, rows[0]);
+}));
+
 app.get('/api/despesas', asyncRoute(async (req, res) => {
   const filters = normalizePeriod(req.query);
   const params = [];
@@ -913,11 +1081,14 @@ app.get('/api/bi', asyncRoute(async (req, res) => {
 
 app.get('/api/pets/:id/prontuario', asyncRoute(async (req, res) => {
   const petId = validatePositiveInt(req.params.id, 'id');
-  const [prontuario, vacinas] = await Promise.all([
+  const [prontuario, vacinas, medicacoes, alertas, anexos] = await Promise.all([
     query('SELECT *, updated_at::text AS updated_at FROM pet_prontuario WHERE pet_id = $1 LIMIT 1', [petId]),
-    query('SELECT id, nome, data_aplicacao::text AS data_aplicacao, data_reforco::text AS data_reforco, observacoes, created_at::text AS created_at FROM pet_vacina WHERE pet_id = $1 ORDER BY COALESCE(data_reforco, data_aplicacao) DESC NULLS LAST, id DESC', [petId])
+    query('SELECT id, nome, data_aplicacao::text AS data_aplicacao, data_reforco::text AS data_reforco, observacoes, created_at::text AS created_at FROM pet_vacina WHERE pet_id = $1 ORDER BY COALESCE(data_reforco, data_aplicacao) DESC NULLS LAST, id DESC', [petId]),
+    query('SELECT id, nome, dosagem, frequencia, data_inicio::text AS data_inicio, data_fim::text AS data_fim, observacoes FROM pet_medicacao WHERE pet_id = $1 AND ativo = true ORDER BY id DESC', [petId]),
+    query('SELECT id, tipo, titulo, descricao, severidade FROM pet_alerta WHERE pet_id = $1 AND ativo = true ORDER BY id DESC', [petId]),
+    query('SELECT id, nome_original, mime_type, tamanho, url, descricao, created_at::text AS created_at FROM pet_anexo WHERE pet_id = $1 ORDER BY created_at DESC', [petId])
   ]);
-  ok(res, { prontuario: prontuario.rows[0] || null, vacinas: vacinas.rows });
+  ok(res, { prontuario: prontuario.rows[0] || null, vacinas: vacinas.rows, medicacoes: medicacoes.rows, alertas: alertas.rows, anexos: anexos.rows });
 }));
 
 app.put('/api/pets/:id/prontuario', asyncRoute(async (req, res) => {
@@ -961,6 +1132,47 @@ app.delete('/api/pets/:petId/vacinas/:vacinaId', requireRole('ADMIN'), asyncRout
   await query('DELETE FROM pet_vacina WHERE id = $1 AND pet_id = $2', [vacinaId, petId]);
   await audit(req, { action: 'pet_vacina.deleted', entityType: 'pet', entityId: petId, metadata: { vacinaId } });
   ok(res, { deleted: true });
+}));
+
+app.post('/api/pets/:id/medicacoes', asyncRoute(async (req, res) => {
+  const petId = validatePositiveInt(req.params.id, 'id');
+  const body = req.body;
+  const { rows } = await query(
+    `INSERT INTO pet_medicacao (pet_id, nome, dosagem, frequencia, data_inicio, data_fim, observacoes, created_by, updated_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+     RETURNING *`,
+    [petId, required(body.nome, 'nome'), body.dosagem || null, body.frequencia || null, body.data_inicio ? validateDate(body.data_inicio, 'data_inicio') : null, body.data_fim ? validateDate(body.data_fim, 'data_fim') : null, body.observacoes || null, req.user.id]
+  );
+  await audit(req, { action: 'pet_medicacao.created', entityType: 'pet', entityId: petId, metadata: { medicacaoId: rows[0].id } });
+  created(res, rows[0]);
+}));
+
+app.post('/api/pets/:id/alertas', asyncRoute(async (req, res) => {
+  const petId = validatePositiveInt(req.params.id, 'id');
+  const body = req.body;
+  const severidade = validateEnum(body.severidade || 'MEDIA', ['BAIXA', 'MEDIA', 'ALTA'], 'severidade');
+  const { rows } = await query(
+    `INSERT INTO pet_alerta (pet_id, tipo, titulo, descricao, severidade, created_by, updated_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $6)
+     RETURNING *`,
+    [petId, body.tipo || 'GERAL', required(body.titulo, 'titulo'), body.descricao || null, severidade, req.user.id]
+  );
+  await audit(req, { action: 'pet_alerta.created', entityType: 'pet', entityId: petId, metadata: { alertaId: rows[0].id } });
+  created(res, rows[0]);
+}));
+
+app.post('/api/pets/:id/anexos', upload.single('arquivo'), asyncRoute(async (req, res) => {
+  const petId = validatePositiveInt(req.params.id, 'id');
+  if (!req.file) throw badRequest('Arquivo obrigatorio.', { field: 'arquivo' });
+  const relative = `/uploads/pets/${req.file.filename}`;
+  const { rows } = await query(
+    `INSERT INTO pet_anexo (pet_id, nome_original, arquivo, mime_type, tamanho, url, descricao, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING *`,
+    [petId, req.file.originalname, req.file.filename, req.file.mimetype, req.file.size, relative, req.body.descricao || null, req.user.id]
+  );
+  await audit(req, { action: 'pet_anexo.uploaded', entityType: 'pet', entityId: petId, metadata: { anexoId: rows[0].id } });
+  created(res, rows[0]);
 }));
 
 app.post('/api/notificacoes/email', requireRole('ADMIN'), asyncRoute(async (req, res) => {
@@ -1158,15 +1370,17 @@ app.post('/api/agendamentos', asyncRoute(async (req, res) => {
   const body = req.body;
   const petId = Number(required(body.pet_id, 'pet_id'));
   const servicoId = Number(required(body.servico_id, 'servico_id'));
+  const profissionalId = body.profissional_id ? Number(validatePositiveInt(body.profissional_id, 'profissional_id')) : null;
   const data = validateDate(body.data);
   const hora = validateTime(body.hora);
   const status = validateEnum(statusDb[body.status] || body.status || 'AGENDADO', ['AGENDADO', 'EM_ANDAMENTO', 'CONCLUIDO', 'CANCELADO'], 'status');
-  if (status !== 'CANCELADO') await assertNoScheduleConflict({ petId, servicoId, data, hora });
+  await assertSubscriptionLimit(req, data);
+  if (status !== 'CANCELADO') await assertNoScheduleConflict({ petId, servicoId, data, hora, profissionalId });
   const { rows } = await query(
-    `INSERT INTO agendamento (pet_id, servico_id, data, hora, status, observacoes)
-     VALUES ($1, $2, $3, $4, $5::status_agendamento, $6)
+    `INSERT INTO agendamento (pet_id, servico_id, profissional_id, empresa_id, loja_id, data, hora, status, observacoes)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::status_agendamento, $9)
      RETURNING id`,
-    [petId, servicoId, data, hora, status, body.observacoes || null]
+    [petId, servicoId, profissionalId, empresaId(req), req.user.loja_id || null, data, hora, status, body.observacoes || null]
   );
   await audit(req, { action: 'agendamento.created', entityType: 'agendamento', entityId: rows[0].id });
   await notifySchedule(req, rows[0].id, 'agendamento criado');
@@ -1177,15 +1391,16 @@ app.put('/api/agendamentos/:id', asyncRoute(async (req, res) => {
   const body = req.body;
   const petId = Number(required(body.pet_id, 'pet_id'));
   const servicoId = Number(required(body.servico_id, 'servico_id'));
+  const profissionalId = body.profissional_id ? Number(validatePositiveInt(body.profissional_id, 'profissional_id')) : null;
   const data = validateDate(body.data);
   const hora = validateTime(body.hora);
   const status = validateEnum(statusDb[body.status] || body.status || 'AGENDADO', ['AGENDADO', 'EM_ANDAMENTO', 'CONCLUIDO', 'CANCELADO'], 'status');
-  if (status !== 'CANCELADO') await assertNoScheduleConflict({ petId, servicoId, data, hora, excludeId: Number(req.params.id) });
+  if (status !== 'CANCELADO') await assertNoScheduleConflict({ petId, servicoId, data, hora, profissionalId, excludeId: Number(req.params.id) });
   await query(
     `UPDATE agendamento
-        SET pet_id = $1, servico_id = $2, data = $3, hora = $4, status = $5::status_agendamento, observacoes = $6
-      WHERE id = $7`,
-    [petId, servicoId, data, hora, status, body.observacoes || null, req.params.id]
+        SET pet_id = $1, servico_id = $2, profissional_id = $3, data = $4, hora = $5, status = $6::status_agendamento, observacoes = $7
+      WHERE id = $8`,
+    [petId, servicoId, profissionalId, data, hora, status, body.observacoes || null, req.params.id]
   );
   await audit(req, { action: 'agendamento.updated', entityType: 'agendamento', entityId: req.params.id });
   await notifySchedule(req, req.params.id, 'agendamento atualizado');

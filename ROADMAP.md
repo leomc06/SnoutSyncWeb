@@ -24,27 +24,32 @@
 - Notificacoes por e-mail/WhatsApp usam webhooks configuraveis.
 - Multiempresa foi preparada com `empresa` e `empresa_id` nas entidades principais.
 - Painel BI basico foi criado com sazonalidade, top servicos e previsao por media historica.
+- Planos SaaS `FILHOTE`, `ADULTO` e `ALPHA` foram adicionados com limites.
+- Lojas, telefones multiplos e profissionais/banhistas foram adicionados.
+- Agenda passou a aceitar profissional e validar conflito por profissional.
+- Prontuario ganhou medicacoes, alertas e upload local de anexos/fotos.
+- E-mail suporta SMTP generico e WhatsApp suporta Evolution API.
 
 ## Preparado
 
-- Adapter de e-mail pode ser substituido por SMTP, SES, Resend ou similar sem mudar os endpoints.
+- E-mail e WhatsApp podem usar SMTP/Evolution API, webhooks ou fallback mock em desenvolvimento.
 - Auditoria esta centralizada em `server/src/utils/audit.js` para ser chamada por novos modulos.
 - RBAC esta centralizado em `requireRole`, pronto para separar permissoes por endpoint.
 - Tabelas `profissional`, `despesa` e `produto` ja possuem campos de status, autoria e timestamps.
-- Calendario visual usa cartoes `draggable`, pronto para persistir remarcacao em uma proxima etapa.
+- Calendario visual usa cartoes `draggable` e persiste remarcacao entre dias visiveis.
 - Docker Compose ja separa banco, API e frontend.
 
 ## Proximos Passos
 
-1. Configurar envio real de e-mail e template de recuperacao de senha.
-2. Criar tela CRUD de profissionais e vincular profissional aos agendamentos.
+1. Aplicar isolamento multiempresa em todas as queries e telas administrativas.
+2. Criar templates profissionais para e-mail e WhatsApp.
 3. Definir matriz completa de permissoes por perfil e aplicar RBAC progressivamente.
 4. Evoluir drag-and-drop para grade semanal completa, considerando profissional/sala e conflito por recurso.
 5. Adicionar constraint opcional de telefone unico somente apos decidir a regra de negocio e limpar duplicidades.
 6. Expandir testes de integracao para despesas, estoque, refresh token e RBAC.
 7. Implantar logs estruturados com nivel, requestId, usuario e duracao da requisicao.
 8. Criar templates e filas para notificacoes de agenda por WhatsApp/e-mail.
-9. Aplicar isolamento multiempresa em todas as queries e telas administrativas.
+9. Migrar anexos locais para storage externo opcional em producao.
 10. Evoluir estoque para movimentacoes por venda/servico e inventario.
 
 ## Longo Prazo
