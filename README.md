@@ -1,96 +1,99 @@
 # SnoutSync Web
 
-Sistema web full stack para gestão de pet shops, banho e tosa, baseado no projeto `github.com/leomc06/SnoutSync-atualizado` e evoluído para uma arquitetura React + Node.js/Express + PostgreSQL.
+Sistema web full stack para gestao de pet shops, banho e tosa, evoluido para uma arquitetura com React, Node.js/Express e PostgreSQL.
+
+## Stack
+
+- Frontend: React 19 + Vite.
+- Backend: Node.js + Express 5.
+- Banco de dados: PostgreSQL.
+- Autenticacao: JWT access token + refresh token opaco com rotacao.
+- Seguranca HTTP: `helmet`, `cors`, `compression` e `express-rate-limit`.
+- Relatorios: CSV e PDF.
+- IA: endpoint com LLM configuravel e fallback local.
+- Infra: Docker, Docker Compose e GitHub Actions.
 
 ## Funcionalidades
 
-- Autenticação com JWT e senha com `bcrypt`.
-- Refresh token com rotacao, logout server-side e blacklist curta de access tokens.
-- Recuperacao de senha com token temporario e adapter mock de e-mail.
-- Auditoria de acoes sensiveis e middleware de permissao por perfil.
-- Migração automática de senha antiga em texto puro para hash no primeiro login válido.
-- Dashboard com métricas operacionais e financeiras.
-- CRUD de clientes, pets, planos, serviços e agendamentos.
-- Serviços com preço e duração por porte do pet.
-- Validação de conflito de horários na agenda.
-- Conclusão de atendimento com valor cobrado e forma de pagamento.
-- Histórico do pet com atendimentos, agendamentos e notas automáticas.
-- Financeiro com receitas, despesas estimadas, lucro e lançamentos.
-- Relatórios financeiros em CSV e PDF.
-- IA em `/api/ai/ask`, com LLM configurável e contexto seguro do PostgreSQL.
-- Consultas SQL da IA limitadas por whitelist, sem execução de SQL livre gerado pela IA.
-- Segurança HTTP com `helmet`, `cors`, `compression` e `express-rate-limit`.
-- Índices PostgreSQL criados automaticamente para consultas principais.
+- Login com JWT e senhas com `bcryptjs`.
+- Migracao automatica de senha antiga em texto puro para hash no primeiro login valido.
+- Refresh token separado do access token, armazenado com hash no banco.
+- Rotacao de refresh token em `/api/auth/refresh`.
+- Logout server-side com revogacao de refresh token e blacklist curta de access token por `jti`.
+- Recuperacao de senha com token temporario, expiracao e adapter mock de e-mail.
+- Politica de senha forte para troca e recuperacao de senha.
+- Auditoria de acoes sensiveis em `audit_log`.
+- Autorizacao por perfil com `requireRole`.
+- Dashboard com metricas operacionais e financeiras.
+- CRUD de clientes, pets, servicos e agendamentos.
+- Validacao de conflito de horarios na agenda.
+- Conclusao de atendimento com valor cobrado e forma de pagamento.
+- Historico do pet com atendimentos, agendamentos e notas automaticas.
+- Financeiro com receitas, despesas estimadas, lucro e lancamentos.
+- Relatorios financeiros em CSV e PDF.
+- IA em `/api/ai/ask`, com contexto seguro do PostgreSQL.
+- UX com busca global, toasts, skeleton loading, erros por campo e calendario operacional preparado para drag-and-drop.
 
 ## Estrutura
 
 ```text
-client/
-  src/
-    components/ui.jsx
-    api.js
-    App.jsx
-    main.jsx
-    styles.css
-  server/
-  migrations/
-    000_base_schema.sql
-    001_security_and_domain_tables.sql
-  src/
-    config/env.js
-    database/ensureSchema.js
-    database/migrate.js
-    middlewares/auth.js
-    middlewares/errors.js
-    middlewares/security.js
-    utils/http.js
-    utils/validators.js
-    services/email.js
-    db.js
-    index.js
-  test/api.test.js
+.
+|-- client/
+|   |-- Dockerfile
+|   |-- nginx.conf
+|   `-- src/
+|       |-- components/ui.jsx
+|       |-- api.js
+|       |-- App.jsx
+|       |-- main.jsx
+|       `-- styles.css
+|-- server/
+|   |-- Dockerfile
+|   |-- migrations/
+|   |   |-- 000_base_schema.sql
+|   |   `-- 001_security_and_domain_tables.sql
+|   |-- src/
+|   |   |-- config/env.js
+|   |   |-- database/ensureSchema.js
+|   |   |-- database/migrate.js
+|   |   |-- middlewares/auth.js
+|   |   |-- middlewares/errors.js
+|   |   |-- middlewares/security.js
+|   |   |-- services/email.js
+|   |   |-- utils/audit.js
+|   |   |-- utils/http.js
+|   |   |-- utils/validators.js
+|   |   |-- db.js
+|   |   `-- index.js
+|   `-- test/api.test.js
+|-- scripts/check-syntax.js
+|-- docker-compose.yml
+|-- ROADMAP.md
+`-- .env.example
 ```
 
-## Rodar Localmente
+## Requisitos
 
-```bash
-npm run install:all
-npm run migrate
-npm run dev
-```
+- Node.js 22 ou superior recomendado.
+- npm.
+- PostgreSQL local ou Docker.
+- Docker e Docker Compose, caso use o ambiente containerizado.
 
-- Frontend: `http://localhost:5173`
-- Backend: `http://localhost:3001/api`
-- Health check: `http://localhost:3001/api/health`
+## Variaveis De Ambiente
 
-Testes:
-
-```bash
-npm test
-```
-
-Lint/verificacao sintatica:
-
-```bash
-npm run lint
-```
-
-Build:
-
-```bash
-npm run build
-```
-
-## Variáveis De Ambiente
-
-Use `.env.example` como base.
+Crie um arquivo `.env` na raiz usando `.env.example` como base.
 
 ```env
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=SnoutSync
+POSTGRES_PORT=5423
 DATABASE_URL=postgresql://postgres:postgres@localhost:5423/SnoutSync
 NODE_ENV=development
 API_PORT=3001
 CORS_ORIGIN=http://localhost:5173
-JWT_SECRET=um_segredo_longo_e_privado
+VITE_API_URL=http://localhost:3001/api
+JWT_SECRET=troque-este-segredo-em-producao
 JWT_EXPIRES_IN=8h
 REFRESH_TOKEN_EXPIRES_DAYS=14
 PASSWORD_RESET_EXPIRES_MINUTES=30
@@ -100,26 +103,102 @@ AI_MODEL=gpt-5.5
 AI_BASE_URL=https://api.openai.com/v1
 ```
 
-Em produção, `DATABASE_URL` e `JWT_SECRET` são obrigatórios e validados no bootstrap da API.
+Em producao, configure obrigatoriamente `DATABASE_URL`, `JWT_SECRET`, `NODE_ENV=production`, `CORS_ORIGIN` e HTTPS no proxy/reverse proxy.
+
+## Rodar Localmente
+
+Instale as dependencias:
+
+```bash
+npm run install:all
+```
+
+Rode as migrations:
+
+```bash
+npm run migrate
+```
+
+Suba frontend e backend em modo desenvolvimento:
+
+```bash
+npm run dev
+```
+
+URLs locais:
+
+- Frontend: `http://localhost:5173`
+- Backend: `http://localhost:3001/api`
+- Health check: `http://localhost:3001/api/health`
+
+## Rodar Com Docker
+
+Crie o `.env` e suba o ambiente completo:
+
+```bash
+docker compose up --build
+```
+
+Servicos:
+
+- Frontend: `http://localhost:5173`
+- Backend: `http://localhost:3001/api`
+- PostgreSQL: porta definida em `POSTGRES_PORT`
+
+## Scripts
+
+- `npm run install:all`: instala dependencias da raiz, backend e frontend.
+- `npm run dev`: sobe backend e frontend em desenvolvimento.
+- `npm run migrate`: executa migrations versionadas.
+- `npm run build`: gera build do frontend.
+- `npm run lint`: verifica sintaxe dos arquivos do backend.
+- `npm test`: executa testes do backend.
+- `npm start`: inicia a API.
 
 ## Login De Desenvolvimento
 
-- Usuário: `leonardo`
-- Senha: `TROCAR_SENHA`
+- Usuario admin: `leonardo`
+- Usuario atendente: `atendente`
+- Senha inicial: `TROCAR_SENHA`
 
-Também existe o usuário `atendente` com a mesma senha no seed atual.
+As senhas iniciais existem apenas para desenvolvimento. No primeiro login valido, senhas antigas em texto puro sao migradas para hash.
+
+## Migrations
+
+As migrations ficam em `server/migrations/` e sao registradas em `schema_migrations`.
+
+Elas podem ser executadas manualmente:
+
+```bash
+npm run migrate
+```
+
+Tambem rodam no bootstrap da API via `ensureSchema()`, mantendo compatibilidade com o fluxo atual.
+
+Tabelas adicionadas ou preparadas:
+
+- `refresh_token`
+- `revoked_token`
+- `password_reset_token`
+- `audit_log`
+- `profissional`
+- `despesa`
+- `produto`
 
 ## API
 
-As rotas protegidas usam `Authorization: Bearer <token>`.
+Rotas publicas:
 
 - `POST /api/auth/login`
 - `POST /api/auth/refresh`
-- `POST /api/auth/logout`
 - `POST /api/auth/password-reset/request`
 - `POST /api/auth/password-reset/confirm`
+- `GET /api/health`
+
+Rotas protegidas usam `Authorization: Bearer <access_token>`:
+
+- `POST /api/auth/logout`
 - `POST /api/auth/change-password`
-- `GET /api/admin/audit-logs` (`ADMIN`)
 - `GET /api/dashboard`
 - `GET /api/clientes`
 - `POST /api/clientes`
@@ -142,182 +221,75 @@ As rotas protegidas usam `Authorization: Bearer <token>`.
 - `GET /api/ai/status`
 - `POST /api/ai/ask`
 
-Respostas JSON novas seguem o envelope:
+Rotas administrativas:
+
+- `GET /api/admin/audit-logs`, restrita a `ADMIN`.
+
+Resposta de sucesso:
 
 ```json
 { "success": true, "data": {} }
 ```
 
-Erros seguem:
+Resposta de erro:
 
 ```json
 { "error": "Mensagem", "code": "BAD_REQUEST", "details": null, "requestId": "..." }
 ```
 
-## Análise Técnica
+## Seguranca
 
-### O Que Está Bom
+- Access token JWT assinado com `JWT_SECRET`.
+- Access token inclui `jti` para permitir blacklist no logout.
+- Refresh token opaco, separado do JWT e salvo apenas como SHA-256 no banco.
+- Refresh token e rotacionado a cada renovacao.
+- Refresh token antigo e invalidado ao gerar um novo.
+- Logout revoga refresh token ativo e bloqueia access token ate sua expiracao.
+- Tokens de recuperacao de senha sao temporarios e tambem salvos com hash.
+- Senha forte exige minimo de 10 caracteres, letra maiuscula, letra minuscula, numero e caractere especial.
+- Auditoria registra ator, acao, entidade, metadados, IP, user-agent e requestId.
+- `requireRole` permite restringir endpoints por perfil.
+- Queries usam parametros para reduzir risco de SQL injection.
+- Erros nao expõem stack trace em producao.
 
-- O domínio principal do pet shop já está bem representado: clientes, pets, serviços, agenda, atendimento e financeiro.
-- O uso de PostgreSQL com enums reduz inconsistências em campos críticos.
-- A IA já trabalha com contexto do banco, sem expor SQL livre.
-- O frontend é simples, direto e responsivo para desktop/mobile.
-- A API usa queries parametrizadas, reduzindo risco de SQL injection.
+## Frontend
 
-### Principais Problemas Encontrados
-
-- `server/src/index.js` concentrava configuração, middlewares, autenticação, validação, queries, regras de negócio e rotas.
-- `client/src/App.jsx` concentrava telas e componentes reutilizáveis.
-- Não havia headers de segurança, compressão HTTP nem rate limit.
-- O erro da API não tinha `requestId`, código de erro ou formato padronizado.
-- Índices importantes do PostgreSQL não eram criados explicitamente.
-- Configurações críticas de produção não eram validadas no bootstrap.
-- Relatórios e rotas protegidas dependiam de padrões mistos de resposta.
-
-### O Que Foi Refatorado
-
-- Configuração de ambiente em `server/src/config/env.js`.
-- Autenticação JWT em `server/src/middlewares/auth.js`.
-- Segurança HTTP em `server/src/middlewares/security.js`.
-- Erros centralizados em `server/src/middlewares/errors.js`.
-- Validações em `server/src/utils/validators.js`.
-- Helpers HTTP em `server/src/utils/http.js`.
-- Preparação de schema/índices em `server/src/database/ensureSchema.js`.
-- Componentes React reutilizáveis em `client/src/components/ui.jsx`.
-
-### O Que Pode Quebrar Em Produção
-
-- Uso de `JWT_SECRET` fraco ou padrão.
-- Banco sem backups e sem migrations versionadas.
-- Falta de HTTPS no proxy/reverse proxy.
-- Faturamento ainda estimado para despesas; despesas reais ainda não têm módulo próprio.
-- IA externa pode falhar por cota, timeout ou chave inválida; por isso há fallback local.
-- Conflito de horários considera duração do serviço, mas ainda não considera profissionais/salas/banhistas.
-
-## Segurança
-
-- `helmet` para headers HTTP.
-- `express-rate-limit` para API e login.
-- CORS com origem configurável por ambiente.
-- JWT com expiração configurável.
-- `bcrypt` para senha.
-- Access token JWT curto configuravel por `JWT_EXPIRES_IN`.
-- Refresh token opaco armazenado apenas com hash em `refresh_token`.
-- Rotacao de refresh token a cada renovacao de sessao.
-- Logout server-side com revogacao do refresh token e blacklist de access token por `jti`.
-- Tokens temporarios de recuperacao de senha com expiracao.
-- Auditoria em `audit_log`.
-- Autorizacao por perfil com `requireRole`.
-- Queries SQL parametrizadas.
-- Respostas de erro sem stack trace em produção.
-- `requestId` por requisição para rastreabilidade.
-
-Melhorias futuras de segurança:
-
-- Configurar envio real de e-mail no adapter `server/src/services/email.js`.
-- Aplicar matriz de permissoes por perfil em mais endpoints administrativos quando a regra de negocio estiver definida.
-- Reduzir `JWT_EXPIRES_IN` em producao e usar HTTPS obrigatorio no proxy.
-
-## PostgreSQL
-
-Índices criados automaticamente:
-
-- `pet(cliente_id)`
-- `plano(cliente_id)`
-- `agendamento(data, hora)`
-- `agendamento(pet_id, data)`
-- `agendamento(status)`
-- `atendimento(agendamento_id)`
-- `historico_pet(pet_id, criado_em DESC)`
-- `LOWER(cliente.nome)`
-- `LOWER(pet.nome)`
-
-Melhorias futuras no banco:
-
-- Constraint de telefone unico opcional por negocio, apos limpeza de duplicidades.
-- CRUDs para profissionais/banhistas, despesas reais e produtos.
-- Auditoria detalhada por campo alterado.
-
-## UX/UI
-
-Melhorias já aplicadas:
-
-- Componentes UI reutilizáveis.
-- Sidebar clara por módulo.
-- Cards de métricas e tabelas responsivas.
-- Modais para edição e conclusão de atendimento.
-- Baixa de relatórios direto na tela Financeiro.
-- Busca global no topo.
-- Toasts de sucesso/erro.
+- Componentes reutilizaveis em `client/src/components/ui.jsx`.
+- Busca global no topo da aplicacao.
+- Toasts de sucesso e erro.
 - Skeleton loading.
-- Tokens de design em CSS.
-- Mensagens de erro por campo quando a API retorna `details.field`.
-- Calendario operacional preparado para drag-and-drop.
+- Tokens CSS de cor, espacamento e raio.
+- Formularios exibem erro por campo quando a API retorna `details.field`.
+- Calendario operacional em agendamentos com cartoes `draggable`, preparado para persistir drag-and-drop futuramente.
 
-Melhorias futuras:
+## IA
 
-- Persistir drag-and-drop na agenda com validacao por profissional/sala.
-- Evoluir a busca global para consultar clientes, pets e agendamentos na API.
-- Separar componentes de formulario em biblioteca interna.
+Configure `AI_API_KEY`, `AI_MODEL` e `AI_BASE_URL` para usar uma LLM externa.
 
-## Docker
+Sem chave configurada, o sistema usa fallback local com dados seguros do PostgreSQL.
 
-Crie um `.env` a partir de `.env.example` e suba o ambiente completo:
+## CI/CD
 
-```bash
-docker compose up --build
-```
+O workflow `.github/workflows/ci.yml` executa:
 
-- Frontend: `http://localhost:5173`
-- Backend: `http://localhost:3001/api`
-- PostgreSQL: porta definida por `POSTGRES_PORT`
+- Instalacao de dependencias.
+- Verificacao sintatica do backend com `npm run lint`.
+- Build do frontend com `npm run build`.
 
-## Migrations
+## Checklist De Producao
 
-As migrations rodam automaticamente no bootstrap da API e tambem podem ser executadas manualmente:
-
-```bash
-npm run migrate
-```
-
-Arquivos versionados ficam em `server/migrations/` e execucoes aplicadas sao registradas em `schema_migrations`.
+- Definir `NODE_ENV=production`.
+- Usar `JWT_SECRET` forte e privado.
+- Usar `DATABASE_URL` com usuario de menor privilegio.
+- Configurar `CORS_ORIGIN` com dominio real.
+- Usar HTTPS no proxy/reverse proxy.
+- Configurar backup do PostgreSQL.
+- Configurar envio real de e-mail em `server/src/services/email.js`.
+- Reduzir `JWT_EXPIRES_IN` conforme a politica de seguranca.
+- Monitorar logs com `requestId`.
+- Configurar variaveis de IA somente no servidor.
+- Nunca versionar `.env`.
 
 ## Roadmap
 
-### Curto Prazo
-
-- Criar módulo de profissionais.
-- Criar despesas reais no financeiro.
-- Melhorar agenda em visão calendário.
-- Criar permissões por perfil `ADMIN` e `ATENDENTE`.
-- Adicionar toasts e estados de loading por botão.
-
-### Médio Prazo
-
-- Migrations versionadas.
-- CI/CD com build, testes e lint.
-- Dockerfile para frontend/backend.
-- Observabilidade com logs estruturados.
-- Relatórios por período e por serviço.
-- Notificações por WhatsApp/e-mail.
-
-### Longo Prazo
-
-- Multiempresa/multilojas.
-- Assinaturas e planos recorrentes.
-- Estoque e produtos.
-- Prontuário avançado do pet.
-- Painel de BI com sazonalidade e previsão de demanda.
-
-## Checklist De Produção
-
-- Definir `NODE_ENV=production`.
-- Definir `DATABASE_URL` com usuário de menor privilégio.
-- Definir `JWT_SECRET` forte.
-- Usar HTTPS no proxy.
-- Configurar `CORS_ORIGIN` com domínio real.
-- Configurar backup do PostgreSQL.
-- Rodar `npm test` e `npm run build` no CI.
-- Monitorar logs com `requestId`.
-- Configurar variáveis de IA somente no servidor.
-- Não versionar `.env`.
+Consulte `ROADMAP.md` para ver o que foi implementado, o que ficou preparado e a ordem recomendada de evolucao.
