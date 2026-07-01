@@ -1,6 +1,9 @@
 import { query } from '../db.js';
+import { runMigrations } from './migrate.js';
 
 export async function ensureSchema() {
+  await runMigrations();
+
   await query(`
     CREATE TABLE IF NOT EXISTS historico_pet (
       id SERIAL PRIMARY KEY,

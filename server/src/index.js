@@ -3,11 +3,13 @@ import PDFDocument from 'pdfkit';
 import { pool, query, transaction } from './db.js';
 import { env, assertProductionEnv } from './config/env.js';
 import { ensureSchema } from './database/ensureSchema.js';
-import { requireAuth, signToken, verifyPassword } from './middlewares/auth.js';
+import { blacklistAccessToken, createPasswordResetToken, createRefreshToken, hashOpaqueToken, hashPassword, requireAuth, requireRole, revokeRefreshToken, revokeUserRefreshTokens, rotateRefreshToken, signToken, verifyPassword } from './middlewares/auth.js';
 import { errorHandler, notFoundHandler } from './middlewares/errors.js';
 import { apiRateLimit, authRateLimit, compressionMiddleware, corsMiddleware, requestId, securityHeaders } from './middlewares/security.js';
 import { asyncRoute, badRequest, conflict, created, notFound, ok, unauthorized } from './utils/http.js';
-import { required, validateDate, validateEnum, validateMoney, validatePositiveInt, validateTime } from './utils/validators.js';
+import { required, validateDate, validateEnum, validateMoney, validatePositiveInt, validateStrongPassword, validateTime } from './utils/validators.js';
+import { sendPasswordResetEmail } from './services/email.js';
+import { audit } from './utils/audit.js';
 
 const app = express();
 assertProductionEnv();
@@ -450,10 +452,111 @@ app.post('/api/auth/login', authRateLimit, asyncRoute(async (req, res) => {
     throw unauthorized('Usuario ou senha invalidos.');
   }
   const { senha: _senha, ...user } = rows[0];
-  ok(res, { user, token: signToken(user) });
+  const refresh = await createRefreshToken(user, req);
+  req.user = user;
+  await audit(req, { action: 'auth.login', entityType: 'usuario', entityId: user.id });
+  ok(res, { user, token: signToken(user), refreshToken: refresh.token, refreshTokenExpiresAt: refresh.expiresAt });
+}));
+
+app.post('/api/auth/refresh', authRateLimit, asyncRoute(async (req, res) => {
+  const refreshToken = required(req.body.refreshToken, 'refreshToken');
+  const session = await rotateRefreshToken(refreshToken, req);
+  req.user = session.user;
+  await audit(req, { action: 'auth.refresh', entityType: 'usuario', entityId: session.user.id });
+  ok(res, { ...session, token: signToken(session.user) });
+}));
+
+app.post('/api/auth/logout', requireAuth, asyncRoute(async (req, res) => {
+  await Promise.all([
+    blacklistAccessToken(req.accessToken, 'logout'),
+    revokeRefreshToken(req.body.refreshToken, req.user.id)
+  ]);
+  await audit(req, { action: 'auth.logout', entityType: 'usuario', entityId: req.user.id });
+  ok(res, { loggedOut: true });
+}));
+
+app.post('/api/auth/password-reset/request', authRateLimit, asyncRoute(async (req, res) => {
+  const usuario = required(req.body.usuario, 'usuario');
+  const { rows } = await query(
+    `SELECT id, nome, usuario
+       FROM usuario
+      WHERE usuario = $1 AND ativo = true
+      LIMIT 1`,
+    [usuario]
+  );
+
+  if (rows[0]) {
+    const reset = createPasswordResetToken();
+    const expiresAt = new Date(Date.now() + env.passwordResetExpiresMinutes * 60 * 1000);
+    await query(
+      `INSERT INTO password_reset_token (usuario_id, token_hash, expires_at, ip_address, user_agent, created_by, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $1, $1)`,
+      [rows[0].id, reset.tokenHash, expiresAt, req.ip || null, req.headers['user-agent'] || null]
+    );
+    await sendPasswordResetEmail({ to: rows[0].usuario, name: rows[0].nome, token: reset.token });
+    req.user = { id: rows[0].id, usuario: rows[0].usuario, nome: rows[0].nome };
+    await audit(req, { action: 'auth.password_reset_requested', entityType: 'usuario', entityId: rows[0].id });
+  }
+
+  ok(res, { message: 'Se o usuario existir, as instrucoes de recuperacao serao enviadas.' });
+}));
+
+app.post('/api/auth/password-reset/confirm', authRateLimit, asyncRoute(async (req, res) => {
+  const token = required(req.body.token, 'token');
+  const novaSenha = validateStrongPassword(req.body.novaSenha || req.body.senha, 'novaSenha');
+  const tokenHash = hashOpaqueToken(token);
+
+  await transaction(async (client) => {
+    const found = await client.query(
+      `SELECT prt.id, prt.usuario_id, u.nome, u.usuario, u.perfil::text AS perfil
+         FROM password_reset_token prt
+         JOIN usuario u ON u.id = prt.usuario_id
+        WHERE prt.token_hash = $1 AND prt.used_at IS NULL AND prt.expires_at > NOW() AND u.ativo = true
+        LIMIT 1
+        FOR UPDATE OF prt`,
+      [tokenHash]
+    );
+    const row = found.rows[0];
+    if (!row) throw unauthorized('Token de recuperacao invalido ou expirado.');
+
+    await client.query('UPDATE usuario SET senha = $1 WHERE id = $2', [await hashPassword(novaSenha), row.usuario_id]);
+    await client.query('UPDATE password_reset_token SET used_at = NOW(), updated_at = NOW(), updated_by = $1 WHERE id = $2', [row.usuario_id, row.id]);
+    await client.query('UPDATE refresh_token SET revoked_at = COALESCE(revoked_at, NOW()), updated_at = NOW(), updated_by = $1 WHERE usuario_id = $1', [row.usuario_id]);
+    req.user = { id: row.usuario_id, nome: row.nome, usuario: row.usuario, perfil: row.perfil };
+  });
+
+  await audit(req, { action: 'auth.password_reset_completed', entityType: 'usuario', entityId: req.user.id });
+  ok(res, { updated: true });
 }));
 
 app.use('/api', requireAuth);
+
+app.post('/api/auth/change-password', asyncRoute(async (req, res) => {
+  const senhaAtual = required(req.body.senhaAtual, 'senhaAtual');
+  const novaSenha = validateStrongPassword(req.body.novaSenha, 'novaSenha');
+  const { rows } = await query('SELECT senha FROM usuario WHERE id = $1 AND ativo = true LIMIT 1', [req.user.id]);
+  if (!rows[0] || !(await verifyPassword(senhaAtual, rows[0].senha, req.user.id))) {
+    throw unauthorized('Senha atual invalida.');
+  }
+  await query('UPDATE usuario SET senha = $1 WHERE id = $2', [await hashPassword(novaSenha), req.user.id]);
+  await revokeUserRefreshTokens(req.user.id);
+  await audit(req, { action: 'auth.password_changed', entityType: 'usuario', entityId: req.user.id });
+  ok(res, { updated: true });
+}));
+
+app.get('/api/admin/audit-logs', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const limit = Math.min(Number(req.query.limit || 100), 200);
+  const { rows } = await query(
+    `SELECT al.id, al.actor_user_id, u.nome AS actor_nome, al.action, al.entity_type, al.entity_id,
+            al.metadata, al.ip_address, al.request_id, al.created_at::text AS created_at
+       FROM audit_log al
+       LEFT JOIN usuario u ON u.id = al.actor_user_id
+      ORDER BY al.created_at DESC
+      LIMIT $1`,
+    [limit]
+  );
+  ok(res, rows);
+}));
 
 app.get('/api/dashboard', asyncRoute(async (_req, res) => {
   ok(res, await dashboardData());
@@ -487,6 +590,7 @@ app.post('/api/clientes', asyncRoute(async (req, res) => {
     }
     return clienteId;
   });
+  await audit(req, { action: 'cliente.created', entityType: 'cliente', entityId: result });
   created(res, { id: result });
 }));
 
@@ -517,6 +621,7 @@ app.put('/api/clientes/:clienteId/pets/:petId', asyncRoute(async (req, res) => {
       await client.query('DELETE FROM plano WHERE cliente_id = $1', [clienteId]);
     }
   });
+  await audit(req, { action: 'cliente.updated', entityType: 'cliente', entityId: clienteId, metadata: { petId } });
   ok(res, { updated: true });
 }));
 
@@ -529,6 +634,7 @@ app.delete('/api/clientes/:clienteId', asyncRoute(async (req, res) => {
     await client.query('DELETE FROM pet WHERE cliente_id = $1', [clienteId]);
     await client.query('DELETE FROM cliente WHERE id = $1', [clienteId]);
   });
+  await audit(req, { action: 'cliente.deleted', entityType: 'cliente', entityId: clienteId });
   ok(res, { deleted: true });
 }));
 
@@ -581,6 +687,7 @@ app.post('/api/servicos', asyncRoute(async (req, res) => {
       Number(required(body.duracao_grande, 'duracao_grande'))
     ]
   );
+  await audit(req, { action: 'servico.created', entityType: 'servico', entityId: rows[0].id });
   created(res, rows[0]);
 }));
 
@@ -605,6 +712,7 @@ app.put('/api/servicos/:id', asyncRoute(async (req, res) => {
     ]
   );
   if (!rows[0]) throw notFound('Servico nao encontrado.');
+  await audit(req, { action: 'servico.updated', entityType: 'servico', entityId: req.params.id });
   ok(res, rows[0]);
 }));
 
@@ -612,6 +720,7 @@ app.delete('/api/servicos/:id', asyncRoute(async (req, res) => {
   const used = await query('SELECT id FROM agendamento WHERE servico_id = $1 LIMIT 1', [req.params.id]);
   if (used.rows[0]) throw conflict('Servico ja possui agendamentos e nao pode ser excluido.');
   await query('DELETE FROM servico WHERE id = $1', [req.params.id]);
+  await audit(req, { action: 'servico.deleted', entityType: 'servico', entityId: req.params.id });
   ok(res, { deleted: true });
 }));
 
@@ -633,6 +742,7 @@ app.post('/api/agendamentos', asyncRoute(async (req, res) => {
      RETURNING id`,
     [petId, servicoId, data, hora, status, body.observacoes || null]
   );
+  await audit(req, { action: 'agendamento.created', entityType: 'agendamento', entityId: rows[0].id });
   created(res, { id: rows[0].id });
 }));
 
@@ -650,6 +760,7 @@ app.put('/api/agendamentos/:id', asyncRoute(async (req, res) => {
       WHERE id = $7`,
     [petId, servicoId, data, hora, status, body.observacoes || null, req.params.id]
   );
+  await audit(req, { action: 'agendamento.updated', entityType: 'agendamento', entityId: req.params.id });
   ok(res, { updated: true });
 }));
 
@@ -679,6 +790,7 @@ app.post('/api/agendamentos/:id/concluir', asyncRoute(async (req, res) => {
     );
   });
 
+  await audit(req, { action: 'agendamento.completed', entityType: 'agendamento', entityId: agendamentoId, metadata: { valor, forma } });
   ok(res, { deleted: true });
 }));
 
@@ -687,6 +799,7 @@ app.delete('/api/agendamentos/:id', asyncRoute(async (req, res) => {
     await client.query('DELETE FROM atendimento WHERE agendamento_id = $1', [req.params.id]);
     await client.query('DELETE FROM agendamento WHERE id = $1', [req.params.id]);
   });
+  await audit(req, { action: 'agendamento.deleted', entityType: 'agendamento', entityId: req.params.id });
   ok(res, { completed: true });
 }));
 
@@ -749,6 +862,7 @@ app.post('/api/ai/ask', asyncRoute(async (req, res) => {
     aiWarning = error.message;
   }
   const answer = modelAnswer || localAiFallback(question, context);
+  await audit(req, { action: 'ai.asked', entityType: 'ai', metadata: { aiUsed: Boolean(modelAnswer) } });
 
   ok(res, {
     answer,

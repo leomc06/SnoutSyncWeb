@@ -31,9 +31,21 @@ export function Modal({ title, onClose, children }) {
 }
 
 export function Loading({ title }) {
-  return <><Header title={title} subtitle="Carregando dados..." /><div className="card">Carregando...</div></>;
+  return <><Header title={title} subtitle="Carregando dados..." /><Skeleton rows={4} /></>;
 }
 
 export function ErrorMessage({ message }) {
   return <div className="alert">{message}</div>;
+}
+
+export function Skeleton({ rows = 3 }) {
+  return <div className="card skeleton-card">{Array.from({ length: rows }).map((_, index) => <span key={index} />)}</div>;
+}
+
+export function FieldError({ message }) {
+  return message ? <small className="field-error">{message}</small> : null;
+}
+
+export function ToastStack({ toasts }) {
+  return <div className="toast-stack">{toasts.map((toast) => <div key={toast.id} className={`toast ${toast.type || 'info'}`}>{toast.message}</div>)}</div>;
 }

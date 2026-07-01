@@ -1,7 +1,7 @@
 services:
   postgres:
     image: postgres:18
-    container_name: SnouSync
+    container_name: snoutsync-postgres
     restart: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -10,12 +10,42 @@ services:
     ports:
       - "${POSTGRES_PORT}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  server:
+    build:
+      context: ./server
+    container_name: snoutsync-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      API_PORT: 3001
+      CORS_ORIGIN: http://localhost:5173
+      FRONTEND_URL: http://localhost:5173
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  client:
+    build:
+      context: ./client
+      args:
+        VITE_API_URL: http://localhost:3001/api
+    container_name: snoutsync-client
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - server
 
 volumes:
   postgres_data:

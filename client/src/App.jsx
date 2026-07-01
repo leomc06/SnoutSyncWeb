@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { api, API_URL } from './api.js';
-import { Badge, ErrorMessage, Header, Loading, Metric, MiniBars, Modal, Rows } from './components/ui.jsx';
+import { api, API_URL, clearSession, saveSession } from './api.js';
+import { Badge, ErrorMessage, FieldError, Header, Loading, Metric, MiniBars, Modal, Rows, Skeleton, ToastStack } from './components/ui.jsx';
 
 const pages = [
   ['dashboard', 'Dashboard'],
@@ -56,6 +56,11 @@ function currency(value) {
   return Number(value || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
+function formErrorState(error) {
+  const field = error.details?.field;
+  return { message: error.message, fields: field ? { [field]: error.message } : {} };
+}
+
 async function downloadReport(path, filename) {
   const token = localStorage.getItem('snoutsync:token');
   const response = await fetch(`${API_URL}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
@@ -93,16 +98,27 @@ function useApiData(path, deps = []) {
 export default function App() {
   const [user, setUser] = useState(storedUser);
   const [page, setPage] = useState('dashboard');
+  const [toasts, setToasts] = useState([]);
 
-  function login(nextUser) {
-    localStorage.setItem('snoutsync:user', JSON.stringify(nextUser.user));
-    localStorage.setItem('snoutsync:token', nextUser.token);
-    setUser(nextUser.user);
+  function notify(message, type = 'info') {
+    const id = crypto.randomUUID();
+    setToasts((current) => [...current, { id, message, type }]);
+    setTimeout(() => setToasts((current) => current.filter((toast) => toast.id !== id)), 4200);
   }
 
-  function logout() {
-    localStorage.removeItem('snoutsync:user');
-    localStorage.removeItem('snoutsync:token');
+  function login(nextUser) {
+    saveSession(nextUser);
+    setUser(nextUser.user);
+    notify('Login realizado com sucesso.', 'success');
+  }
+
+  async function logout() {
+    try {
+      await api('/auth/logout', { method: 'POST', body: { refreshToken: localStorage.getItem('snoutsync:refreshToken') } });
+    } catch {
+      // Mesmo se o token ja expirou, a saida local deve acontecer.
+    }
+    clearSession();
     setUser(null);
   }
 
@@ -124,20 +140,40 @@ export default function App() {
         </div>
       </aside>
       <main>
+        <GlobalSearch currentPage={page} go={setPage} />
         {page === 'dashboard' && <Dashboard go={setPage} />}
-        {page === 'clientes' && <Clientes />}
-        {page === 'agendamentos' && <Agendamentos />}
-        {page === 'servicos' && <Servicos />}
-        {page === 'financeiro' && <Financeiro />}
-        {page === 'ia' && <Assistant />}
+        {page === 'clientes' && <Clientes notify={notify} />}
+        {page === 'agendamentos' && <Agendamentos notify={notify} />}
+        {page === 'servicos' && <Servicos notify={notify} />}
+        {page === 'financeiro' && <Financeiro notify={notify} />}
+        {page === 'ia' && <Assistant notify={notify} />}
+        <ToastStack toasts={toasts} />
       </main>
     </div>
   );
 }
 
+function GlobalSearch({ currentPage, go }) {
+  const [term, setTerm] = useState('');
+  const matches = pages.filter(([, label]) => label.toLowerCase().includes(term.toLowerCase()));
+
+  return <div className="topbar">
+    <div className="global-search">
+      <input value={term} onChange={(e) => setTerm(e.target.value)} placeholder="Busca global: telas, agenda, clientes..." />
+      {term && <div className="search-results">
+        <Rows rows={matches} empty="Nenhuma tela encontrada" render={([key, label]) => (
+          <button key={key} className={currentPage === key ? 'active' : ''} onClick={() => { go(key); setTerm(''); }}>{label}</button>
+        )} />
+      </div>}
+    </div>
+  </div>;
+}
+
 function Login({ onLogin }) {
   const [form, setForm] = useState({ usuario: 'leonardo', senha: 'TROCAR_SENHA' });
   const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [recovering, setRecovering] = useState(false);
   const [loading, setLoading] = useState(false);
 
   async function submit(event) {
@@ -147,6 +183,20 @@ function Login({ onLogin }) {
     try {
       const data = await api('/auth/login', { method: 'POST', body: form });
       onLogin(data);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function requestReset() {
+    setLoading(true);
+    setError('');
+    setMessage('');
+    try {
+      const data = await api('/auth/password-reset/request', { method: 'POST', body: { usuario: form.usuario } });
+      setMessage(data.message);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -166,9 +216,13 @@ function Login({ onLogin }) {
         <p className="eyebrow">Bem-vindo de volta</p>
         <h2>Acesse sua conta</h2>
         <label>Usuario<input value={form.usuario} onChange={(e) => setForm({ ...form, usuario: e.target.value })} /></label>
-        <label>Senha<input type="password" value={form.senha} onChange={(e) => setForm({ ...form, senha: e.target.value })} /></label>
+        {!recovering && <label>Senha<input type="password" value={form.senha} onChange={(e) => setForm({ ...form, senha: e.target.value })} /></label>}
         {error && <div className="alert">{error}</div>}
-        <button className="primary" disabled={loading}>{loading ? 'Entrando...' : 'Entrar'}</button>
+        {message && <div className="success-message">{message}</div>}
+        {recovering
+          ? <button className="primary" type="button" disabled={loading} onClick={requestReset}>{loading ? 'Enviando...' : 'Enviar recuperacao'}</button>
+          : <button className="primary" disabled={loading}>{loading ? 'Entrando...' : 'Entrar'}</button>}
+        <button className="link-button" type="button" onClick={() => setRecovering((value) => !value)}>{recovering ? 'Voltar ao login' : 'Esqueci minha senha'}</button>
         <small>API: {API_URL}</small>
       </form>
     </div>
@@ -213,7 +267,7 @@ function Dashboard({ go }) {
   );
 }
 
-function Clientes() {
+function Clientes({ notify }) {
   const [search, setSearch] = useState('');
   const [reload, setReload] = useState(0);
   const [editing, setEditing] = useState(null);
@@ -222,8 +276,13 @@ function Clientes() {
 
   async function remove(cliente) {
     if (!confirm(`Excluir ${cliente.nome} e seus registros relacionados?`)) return;
-    await api(`/clientes/${cliente.cliente_id}`, { method: 'DELETE' });
-    setReload((value) => value + 1);
+    try {
+      await api(`/clientes/${cliente.cliente_id}`, { method: 'DELETE' });
+      notify('Cliente excluido com sucesso.', 'success');
+      setReload((value) => value + 1);
+    } catch (error) {
+      notify(error.message, 'error');
+    }
   }
 
   return (
@@ -231,7 +290,7 @@ function Clientes() {
       <Header title="Clientes e Pets" subtitle="Cadastros espelhados do sistema original." action={<button className="primary" onClick={() => setEditing(emptyClient)}>+ Novo Cliente</button>} />
       <div className="toolbar"><input placeholder="Buscar cliente, pet, telefone ou raca" value={search} onChange={(e) => setSearch(e.target.value)} /><button onClick={() => setSearch('')}>Limpar</button></div>
       <div className="card table-card">
-        {loading && <p>Carregando...</p>}
+        {loading && <Skeleton rows={4} />}
         {error && <ErrorMessage message={error} />}
         {data && <Rows rows={data} empty="Nenhum cliente encontrado" render={(item) => (
           <div className="table-row" key={`${item.cliente_id}-${item.pet_id}`}>
@@ -243,7 +302,7 @@ function Clientes() {
           </div>
         )} />}
       </div>
-      {editing && <ClientModal client={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); setReload((v) => v + 1); }} />}
+      {editing && <ClientModal client={editing} onClose={() => setEditing(null)} onSaved={() => { notify('Cliente salvo com sucesso.', 'success'); setEditing(null); setReload((v) => v + 1); }} />}
       {historyPet && <HistoryModal pet={historyPet} onClose={() => setHistoryPet(null)} />}
     </>
   );
@@ -251,21 +310,27 @@ function Clientes() {
 
 function ClientModal({ client, onClose, onSaved }) {
   const [form, setForm] = useState({ ...emptyClient, ...client, tipo: client.tipo || 'AVULSO', porte: client.porte || 'M' });
+  const [errors, setErrors] = useState({ message: '', fields: {} });
   const isEdit = Boolean(client.cliente_id);
 
   async function submit(event) {
     event.preventDefault();
     const method = isEdit ? 'PUT' : 'POST';
     const path = isEdit ? `/clientes/${client.cliente_id}/pets/${client.pet_id}` : '/clientes';
-    await api(path, { method, body: form });
-    onSaved();
+    try {
+      await api(path, { method, body: form });
+      onSaved();
+    } catch (error) {
+      setErrors(formErrorState(error));
+    }
   }
 
   return <Modal title={isEdit ? 'Editar Cliente' : 'Novo Cliente'} onClose={onClose}><form className="form-grid" onSubmit={submit}>
-    <label>Nome<input required value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} /></label>
+    {errors.message && <div className="alert wide">{errors.message}</div>}
+    <label>Nome<input required value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} /><FieldError message={errors.fields.nome} /></label>
     <label>Telefone<input value={form.telefone || ''} onChange={(e) => setForm({ ...form, telefone: e.target.value })} /></label>
     <label>Tipo<select value={form.tipo} onChange={(e) => setForm({ ...form, tipo: e.target.value })}><option value="AVULSO">Avulso</option><option value="PLANO">Plano</option></select></label>
-    <label>Pet<input required value={form.pet_nome} onChange={(e) => setForm({ ...form, pet_nome: e.target.value })} /></label>
+    <label>Pet<input required value={form.pet_nome} onChange={(e) => setForm({ ...form, pet_nome: e.target.value })} /><FieldError message={errors.fields.pet_nome} /></label>
     <label>Especie<input value={form.especie || ''} onChange={(e) => setForm({ ...form, especie: e.target.value })} /></label>
     <label>Raca<input value={form.raca || ''} onChange={(e) => setForm({ ...form, raca: e.target.value })} /></label>
     <label>Peso<input type="number" step="0.1" value={form.peso || ''} onChange={(e) => setForm({ ...form, peso: e.target.value })} /></label>
@@ -293,21 +358,26 @@ function HistoryModal({ pet, onClose }) {
   </Modal>;
 }
 
-function Servicos() {
+function Servicos({ notify }) {
   const [reload, setReload] = useState(0);
   const [editing, setEditing] = useState(null);
   const { loading, error, data } = useApiData('/servicos', [reload]);
 
   async function remove(servico) {
     if (!confirm(`Excluir o servico ${servico.nome}?`)) return;
-    await api(`/servicos/${servico.id}`, { method: 'DELETE' });
-    setReload((value) => value + 1);
+    try {
+      await api(`/servicos/${servico.id}`, { method: 'DELETE' });
+      notify('Servico excluido com sucesso.', 'success');
+      setReload((value) => value + 1);
+    } catch (error) {
+      notify(error.message, 'error');
+    }
   }
 
   return <>
     <Header title="Servicos" subtitle="Edite precos, duracao e catalogo de banho e tosa." action={<button className="primary" onClick={() => setEditing(emptyService)}>+ Novo Servico</button>} />
     <div className="card table-card">
-      {loading && <p>Carregando...</p>}
+      {loading && <Skeleton rows={4} />}
       {error && <ErrorMessage message={error} />}
       {data && <Rows rows={data} empty="Nenhum servico cadastrado" render={(item) => (
         <div className="table-row service-row" key={item.id}>
@@ -319,18 +389,23 @@ function Servicos() {
         </div>
       )} />}
     </div>
-    {editing && <ServiceModal service={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); setReload((v) => v + 1); }} />}
+    {editing && <ServiceModal service={editing} onClose={() => setEditing(null)} onSaved={() => { notify('Servico salvo com sucesso.', 'success'); setEditing(null); setReload((v) => v + 1); }} />}
   </>;
 }
 
 function ServiceModal({ service, onClose, onSaved }) {
   const [form, setForm] = useState({ ...emptyService, ...service });
+  const [errors, setErrors] = useState({ message: '', fields: {} });
   const isEdit = Boolean(service.id);
 
   async function submit(event) {
     event.preventDefault();
-    await api(isEdit ? `/servicos/${service.id}` : '/servicos', { method: isEdit ? 'PUT' : 'POST', body: form });
-    onSaved();
+    try {
+      await api(isEdit ? `/servicos/${service.id}` : '/servicos', { method: isEdit ? 'PUT' : 'POST', body: form });
+      onSaved();
+    } catch (error) {
+      setErrors(formErrorState(error));
+    }
   }
 
   function field(name, value) {
@@ -338,7 +413,8 @@ function ServiceModal({ service, onClose, onSaved }) {
   }
 
   return <Modal title={isEdit ? 'Editar Servico' : 'Novo Servico'} onClose={onClose}><form className="form-grid" onSubmit={submit}>
-    <label>Nome<input required value={form.nome} onChange={(e) => field('nome', e.target.value)} /></label>
+    {errors.message && <div className="alert wide">{errors.message}</div>}
+    <label>Nome<input required value={form.nome} onChange={(e) => field('nome', e.target.value)} /><FieldError message={errors.fields.nome} /></label>
     <label>Descricao<input value={form.descricao || ''} onChange={(e) => field('descricao', e.target.value)} /></label>
     <label>Preco pequeno<input required type="number" step="0.01" value={form.preco_pequeno} onChange={(e) => field('preco_pequeno', e.target.value)} /></label>
     <label>Duracao pequeno<input required type="number" value={form.duracao_pequeno} onChange={(e) => field('duracao_pequeno', e.target.value)} /></label>
@@ -350,7 +426,7 @@ function ServiceModal({ service, onClose, onSaved }) {
   </form></Modal>;
 }
 
-function Agendamentos() {
+function Agendamentos({ notify }) {
   const [filters, setFilters] = useState({ data: '', status: 'Todos', search: '' });
   const [reload, setReload] = useState(0);
   const [editing, setEditing] = useState(null);
@@ -361,8 +437,13 @@ function Agendamentos() {
 
   async function remove(item) {
     if (!confirm('Excluir este agendamento?')) return;
-    await api(`/agendamentos/${item.id}`, { method: 'DELETE' });
-    setReload((value) => value + 1);
+    try {
+      await api(`/agendamentos/${item.id}`, { method: 'DELETE' });
+      notify('Agendamento excluido com sucesso.', 'success');
+      setReload((value) => value + 1);
+    } catch (error) {
+      notify(error.message, 'error');
+    }
   }
 
   return (
@@ -374,8 +455,9 @@ function Agendamentos() {
         <input placeholder="Buscar agendamento" value={filters.search} onChange={(e) => setFilters({ ...filters, search: e.target.value })} />
         <button onClick={() => setFilters({ data: '', status: 'Todos', search: '' })}>Limpar</button>
       </div>
+      {data && <CalendarStrip items={data} onEdit={setEditing} />}
       <div className="card table-card">
-        {loading && <p>Carregando...</p>}
+        {loading && <Skeleton rows={4} />}
         {error && <ErrorMessage message={error} />}
         {data && <Rows rows={data} empty="Nenhum agendamento encontrado" render={(item) => (
           <div className="table-row schedule" key={item.id}>
@@ -387,10 +469,34 @@ function Agendamentos() {
           </div>
         )} />}
       </div>
-      {editing && <ScheduleModal schedule={editing} refs={refs} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); setReload((v) => v + 1); }} />}
-      {closing && <CheckoutModal schedule={closing} onClose={() => setClosing(null)} onSaved={() => { setClosing(null); setReload((v) => v + 1); }} />}
+      {editing && <ScheduleModal schedule={editing} refs={refs} onClose={() => setEditing(null)} onSaved={() => { notify('Agendamento salvo com sucesso.', 'success'); setEditing(null); setReload((v) => v + 1); }} />}
+      {closing && <CheckoutModal schedule={closing} onClose={() => setClosing(null)} onSaved={() => { notify('Atendimento concluido com sucesso.', 'success'); setClosing(null); setReload((v) => v + 1); }} />}
     </>
   );
+}
+
+function CalendarStrip({ items, onEdit }) {
+  const byDate = items.reduce((acc, item) => {
+    acc[item.data] = acc[item.data] || [];
+    acc[item.data].push(item);
+    return acc;
+  }, {});
+  const dates = Object.keys(byDate).sort().slice(0, 7);
+  if (!dates.length) return null;
+
+  return <section className="calendar-strip card">
+    <div className="card-title"><h3>Calendario operacional</h3><small>Cartoes preparados para drag-and-drop futuro</small></div>
+    <div className="calendar-grid">
+      {dates.map((date) => <div className="calendar-day" key={date}>
+        <strong>{new Date(`${date}T00:00:00`).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })}</strong>
+        {byDate[date].map((item) => <button draggable className="calendar-event" key={item.id} onClick={() => onEdit(item)} title="Arraste futuramente para remarcar">
+          <span>{item.hora}</span>
+          <b>{item.pet_nome}</b>
+          <small>{item.servico_nome}</small>
+        </button>)}
+      </div>)}
+    </div>
+  </section>;
 }
 
 function useRefs(reload) {
@@ -401,19 +507,25 @@ function useRefs(reload) {
 
 function ScheduleModal({ schedule, refs, onClose, onSaved }) {
   const [form, setForm] = useState({ ...emptySchedule, ...schedule, status: schedule.status || 'AGENDADO' });
+  const [errors, setErrors] = useState({ message: '', fields: {} });
   const isEdit = Boolean(schedule.id);
 
   async function submit(event) {
     event.preventDefault();
-    await api(isEdit ? `/agendamentos/${schedule.id}` : '/agendamentos', { method: isEdit ? 'PUT' : 'POST', body: form });
-    onSaved();
+    try {
+      await api(isEdit ? `/agendamentos/${schedule.id}` : '/agendamentos', { method: isEdit ? 'PUT' : 'POST', body: form });
+      onSaved();
+    } catch (error) {
+      setErrors(formErrorState(error));
+    }
   }
 
   return <Modal title={isEdit ? 'Editar Agendamento' : 'Novo Agendamento'} onClose={onClose}><form className="form-grid" onSubmit={submit}>
-    <label>Pet<select required value={form.pet_id} onChange={(e) => setForm({ ...form, pet_id: e.target.value })}><option value="">Selecione</option>{refs.pets.map((pet) => <option key={pet.id} value={pet.id}>{pet.nome} - {pet.cliente_nome}</option>)}</select></label>
-    <label>Servico<select required value={form.servico_id} onChange={(e) => setForm({ ...form, servico_id: e.target.value })}><option value="">Selecione</option>{refs.servicos.map((servico) => <option key={servico.id} value={servico.id}>{servico.nome}</option>)}</select></label>
-    <label>Data<input required type="date" value={form.data} onChange={(e) => setForm({ ...form, data: e.target.value })} /></label>
-    <label>Hora<input required type="time" value={form.hora} onChange={(e) => setForm({ ...form, hora: e.target.value })} /></label>
+    {errors.message && <div className="alert wide">{errors.message}</div>}
+    <label>Pet<select required value={form.pet_id} onChange={(e) => setForm({ ...form, pet_id: e.target.value })}><option value="">Selecione</option>{refs.pets.map((pet) => <option key={pet.id} value={pet.id}>{pet.nome} - {pet.cliente_nome}</option>)}</select><FieldError message={errors.fields.pet_id} /></label>
+    <label>Servico<select required value={form.servico_id} onChange={(e) => setForm({ ...form, servico_id: e.target.value })}><option value="">Selecione</option>{refs.servicos.map((servico) => <option key={servico.id} value={servico.id}>{servico.nome}</option>)}</select><FieldError message={errors.fields.servico_id} /></label>
+    <label>Data<input required type="date" value={form.data} onChange={(e) => setForm({ ...form, data: e.target.value })} /><FieldError message={errors.fields.data} /></label>
+    <label>Hora<input required type="time" value={form.hora} onChange={(e) => setForm({ ...form, hora: e.target.value })} /><FieldError message={errors.fields.hora} /></label>
     <label>Status<select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}><option value="AGENDADO">Confirmado</option><option value="EM_ANDAMENTO">Pendente</option><option value="CONCLUIDO">Concluido</option><option value="CANCELADO">Cancelado</option></select></label>
     <label className="wide">Observacoes<input value={form.observacoes || ''} onChange={(e) => setForm({ ...form, observacoes: e.target.value })} /></label>
     <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Salvar</button></div>
@@ -422,21 +534,27 @@ function ScheduleModal({ schedule, refs, onClose, onSaved }) {
 
 function CheckoutModal({ schedule, onClose, onSaved }) {
   const [form, setForm] = useState({ valor_cobrado: schedule.valor_cobrado ?? schedule.valor_estimado, forma_pagamento: schedule.forma_pagamento || 'Pix' });
+  const [errors, setErrors] = useState({ message: '', fields: {} });
 
   async function submit(event) {
     event.preventDefault();
-    await api(`/agendamentos/${schedule.id}/concluir`, { method: 'POST', body: form });
-    onSaved();
+    try {
+      await api(`/agendamentos/${schedule.id}/concluir`, { method: 'POST', body: form });
+      onSaved();
+    } catch (error) {
+      setErrors(formErrorState(error));
+    }
   }
 
   return <Modal title={`Concluir ${schedule.pet_nome}`} onClose={onClose}><form className="form-grid" onSubmit={submit}>
-    <label>Valor cobrado<input required type="number" step="0.01" value={form.valor_cobrado} onChange={(e) => setForm({ ...form, valor_cobrado: e.target.value })} /></label>
-    <label>Forma de pagamento<select value={form.forma_pagamento} onChange={(e) => setForm({ ...form, forma_pagamento: e.target.value })}><option>Pix</option><option>Cartao</option><option>Dinheiro</option><option>Plano mensal</option></select></label>
+    {errors.message && <div className="alert wide">{errors.message}</div>}
+    <label>Valor cobrado<input required type="number" step="0.01" value={form.valor_cobrado} onChange={(e) => setForm({ ...form, valor_cobrado: e.target.value })} /><FieldError message={errors.fields.valor_cobrado} /></label>
+    <label>Forma de pagamento<select value={form.forma_pagamento} onChange={(e) => setForm({ ...form, forma_pagamento: e.target.value })}><option>Pix</option><option>Cartao</option><option>Dinheiro</option><option>Plano mensal</option></select><FieldError message={errors.fields.forma_pagamento} /></label>
     <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Registrar pagamento</button></div>
   </form></Modal>;
 }
 
-function Financeiro() {
+function Financeiro({ notify }) {
   const { loading, error, data } = useApiData('/financeiro', []);
   if (loading) return <Loading title="Financeiro" />;
   if (error) return <ErrorMessage message={error} />;
@@ -451,7 +569,7 @@ function Financeiro() {
         <Metric label="Em aberto" value={currency(data.resumo.aberto)} hint="Pendentes" />
       </section>
       <div className="card table-card">
-        <div className="card-title"><h3>Lancamentos</h3><span className="actions"><button onClick={() => downloadReport('/relatorios/financeiro.csv', 'financeiro-snoutsync.csv')}>CSV</button><button onClick={() => downloadReport('/relatorios/financeiro.pdf', 'financeiro-snoutsync.pdf')}>PDF</button></span></div>
+        <div className="card-title"><h3>Lancamentos</h3><span className="actions"><button onClick={() => downloadReport('/relatorios/financeiro.csv', 'financeiro-snoutsync.csv').catch((error) => notify(error.message, 'error'))}>CSV</button><button onClick={() => downloadReport('/relatorios/financeiro.pdf', 'financeiro-snoutsync.pdf').catch((error) => notify(error.message, 'error'))}>PDF</button></span></div>
         <Rows rows={data.lancamentos} empty="Nenhum lancamento" render={(item) => (
           <div className="table-row" key={item.id}><span>{new Date(`${item.data}T00:00:00`).toLocaleDateString('pt-BR')}</span><span>{item.descricao}</span><span>{item.categoria}</span><strong>{currency(item.valor)}</strong><Badge text={item.status} /></div>
         )} />
@@ -460,7 +578,7 @@ function Financeiro() {
   );
 }
 
-function Assistant() {
+function Assistant({ notify }) {
   const [question, setQuestion] = useState('Como esta o financeiro?');
   const [answer, setAnswer] = useState('');
   const [loading, setLoading] = useState(false);
@@ -471,6 +589,9 @@ function Assistant() {
     try {
       const data = await api('/ai/ask', { method: 'POST', body: { question } });
       setAnswer(`${data.answer}\nFonte: ${data.source}`);
+      notify('Resposta gerada com sucesso.', 'success');
+    } catch (error) {
+      notify(error.message, 'error');
     } finally {
       setLoading(false);
     }

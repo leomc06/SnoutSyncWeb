@@ -5,6 +5,9 @@ Sistema web full stack para gestão de pet shops, banho e tosa, baseado no proje
 ## Funcionalidades
 
 - Autenticação com JWT e senha com `bcrypt`.
+- Refresh token com rotacao, logout server-side e blacklist curta de access tokens.
+- Recuperacao de senha com token temporario e adapter mock de e-mail.
+- Auditoria de acoes sensiveis e middleware de permissao por perfil.
 - Migração automática de senha antiga em texto puro para hash no primeiro login válido.
 - Dashboard com métricas operacionais e financeiras.
 - CRUD de clientes, pets, planos, serviços e agendamentos.
@@ -29,15 +32,20 @@ client/
     App.jsx
     main.jsx
     styles.css
-server/
+  server/
+  migrations/
+    000_base_schema.sql
+    001_security_and_domain_tables.sql
   src/
     config/env.js
     database/ensureSchema.js
+    database/migrate.js
     middlewares/auth.js
     middlewares/errors.js
     middlewares/security.js
     utils/http.js
     utils/validators.js
+    services/email.js
     db.js
     index.js
   test/api.test.js
@@ -47,6 +55,7 @@ server/
 
 ```bash
 npm run install:all
+npm run migrate
 npm run dev
 ```
 
@@ -58,6 +67,12 @@ Testes:
 
 ```bash
 npm test
+```
+
+Lint/verificacao sintatica:
+
+```bash
+npm run lint
 ```
 
 Build:
@@ -77,6 +92,9 @@ API_PORT=3001
 CORS_ORIGIN=http://localhost:5173
 JWT_SECRET=um_segredo_longo_e_privado
 JWT_EXPIRES_IN=8h
+REFRESH_TOKEN_EXPIRES_DAYS=14
+PASSWORD_RESET_EXPIRES_MINUTES=30
+FRONTEND_URL=http://localhost:5173
 AI_API_KEY=
 AI_MODEL=gpt-5.5
 AI_BASE_URL=https://api.openai.com/v1
@@ -96,6 +114,12 @@ Também existe o usuário `atendente` com a mesma senha no seed atual.
 As rotas protegidas usam `Authorization: Bearer <token>`.
 
 - `POST /api/auth/login`
+- `POST /api/auth/refresh`
+- `POST /api/auth/logout`
+- `POST /api/auth/password-reset/request`
+- `POST /api/auth/password-reset/confirm`
+- `POST /api/auth/change-password`
+- `GET /api/admin/audit-logs` (`ADMIN`)
 - `GET /api/dashboard`
 - `GET /api/clientes`
 - `POST /api/clientes`
@@ -177,18 +201,22 @@ Erros seguem:
 - CORS com origem configurável por ambiente.
 - JWT com expiração configurável.
 - `bcrypt` para senha.
+- Access token JWT curto configuravel por `JWT_EXPIRES_IN`.
+- Refresh token opaco armazenado apenas com hash em `refresh_token`.
+- Rotacao de refresh token a cada renovacao de sessao.
+- Logout server-side com revogacao do refresh token e blacklist de access token por `jti`.
+- Tokens temporarios de recuperacao de senha com expiracao.
+- Auditoria em `audit_log`.
+- Autorizacao por perfil com `requireRole`.
 - Queries SQL parametrizadas.
 - Respostas de erro sem stack trace em produção.
 - `requestId` por requisição para rastreabilidade.
 
 Melhorias futuras de segurança:
 
-- Refresh token com rotação.
-- Logout server-side com blacklist curta.
-- Política de senha forte.
-- Recuperação de senha por e-mail.
-- Auditoria de ações sensíveis.
-- Controle de permissões por perfil em endpoints administrativos.
+- Configurar envio real de e-mail no adapter `server/src/services/email.js`.
+- Aplicar matriz de permissoes por perfil em mais endpoints administrativos quando a regra de negocio estiver definida.
+- Reduzir `JWT_EXPIRES_IN` em producao e usar HTTPS obrigatorio no proxy.
 
 ## PostgreSQL
 
@@ -206,12 +234,9 @@ Melhorias futuras de segurança:
 
 Melhorias futuras no banco:
 
-- Migrations versionadas com ferramenta dedicada.
-- Constraint de telefone único opcional por negócio.
-- Tabela de profissionais/banhistas.
-- Tabela de despesas reais.
-- Tabela de estoque/produtos.
-- Auditoria de alterações por usuário.
+- Constraint de telefone unico opcional por negocio, apos limpeza de duplicidades.
+- CRUDs para profissionais/banhistas, despesas reais e produtos.
+- Auditoria detalhada por campo alterado.
 
 ## UX/UI
 
@@ -222,15 +247,40 @@ Melhorias já aplicadas:
 - Cards de métricas e tabelas responsivas.
 - Modais para edição e conclusão de atendimento.
 - Baixa de relatórios direto na tela Financeiro.
-
-Melhorias futuras:
-
-- Calendário semanal/diário drag-and-drop.
 - Busca global no topo.
 - Toasts de sucesso/erro.
 - Skeleton loading.
-- Design system com tokens de cor, espaçamento e tipografia.
-- Formulários com mensagens por campo.
+- Tokens de design em CSS.
+- Mensagens de erro por campo quando a API retorna `details.field`.
+- Calendario operacional preparado para drag-and-drop.
+
+Melhorias futuras:
+
+- Persistir drag-and-drop na agenda com validacao por profissional/sala.
+- Evoluir a busca global para consultar clientes, pets e agendamentos na API.
+- Separar componentes de formulario em biblioteca interna.
+
+## Docker
+
+Crie um `.env` a partir de `.env.example` e suba o ambiente completo:
+
+```bash
+docker compose up --build
+```
+
+- Frontend: `http://localhost:5173`
+- Backend: `http://localhost:3001/api`
+- PostgreSQL: porta definida por `POSTGRES_PORT`
+
+## Migrations
+
+As migrations rodam automaticamente no bootstrap da API e tambem podem ser executadas manualmente:
+
+```bash
+npm run migrate
+```
+
+Arquivos versionados ficam em `server/migrations/` e execucoes aplicadas sao registradas em `schema_migrations`.
 
 ## Roadmap
 

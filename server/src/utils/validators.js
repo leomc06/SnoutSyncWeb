@@ -46,3 +46,19 @@ export function validatePositiveInt(value, field) {
   }
   return number;
 }
+
+export function validateStrongPassword(value, field = 'senha') {
+  const password = String(required(value, field));
+  const rules = [
+    [password.length >= 10, 'minimo de 10 caracteres'],
+    [/[a-z]/.test(password), 'uma letra minuscula'],
+    [/[A-Z]/.test(password), 'uma letra maiuscula'],
+    [/\d/.test(password), 'um numero'],
+    [/[^A-Za-z0-9]/.test(password), 'um caractere especial']
+  ];
+  const missing = rules.filter(([valid]) => !valid).map(([, label]) => label);
+  if (missing.length) {
+    throw badRequest(`Senha fraca. Use ${missing.join(', ')}.`, { field, missing });
+  }
+  return password;
+}

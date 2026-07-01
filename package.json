@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "concurrently \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
     "build": "npm run build --prefix client",
+    "lint": "node scripts/check-syntax.js",
     "start": "npm run start --prefix server",
+    "migrate": "npm run migrate --prefix server",
     "test": "npm test --prefix server",
     "install:all": "npm install && npm install --prefix server && npm install --prefix client"
   },
