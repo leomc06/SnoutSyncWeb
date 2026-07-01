@@ -19,7 +19,7 @@ function refreshExpiresAt() {
 
 export function signToken(user) {
   return jwt.sign(
-    { id: user.id, nome: user.nome, usuario: user.usuario, perfil: user.perfil, type: 'access' },
+    { id: user.id, nome: user.nome, usuario: user.usuario, perfil: user.perfil, empresa_id: user.empresa_id || 1, type: 'access' },
     env.jwtSecret,
     { expiresIn: env.jwtExpiresIn, jwtid: crypto.randomUUID() }
   );
@@ -95,7 +95,7 @@ export async function rotateRefreshToken(refreshToken, req) {
   return transaction(async (client) => {
     const { rows } = await client.query(
       `SELECT rt.id, rt.usuario_id, rt.expires_at, rt.revoked_at,
-              u.id AS user_id, u.nome, u.usuario, u.perfil::text AS perfil
+              u.id AS user_id, u.nome, u.usuario, u.perfil::text AS perfil, COALESCE(u.empresa_id, 1) AS empresa_id
          FROM refresh_token rt
          JOIN usuario u ON u.id = rt.usuario_id
         WHERE rt.token_hash = $1 AND u.ativo = true
@@ -109,7 +109,7 @@ export async function rotateRefreshToken(refreshToken, req) {
       throw unauthorized('Refresh token invalido ou expirado.');
     }
 
-    const user = { id: current.user_id, nome: current.nome, usuario: current.usuario, perfil: current.perfil };
+    const user = { id: current.user_id, nome: current.nome, usuario: current.usuario, perfil: current.perfil, empresa_id: current.empresa_id };
     await client.query('UPDATE refresh_token SET revoked_at = NOW(), updated_at = NOW(), updated_by = $1 WHERE id = $2', [user.id, current.id]);
     const nextRefresh = await createRefreshToken(user, req, client);
     await client.query('UPDATE refresh_token SET replaced_by_id = $1 WHERE id = $2', [nextRefresh.id, current.id]);

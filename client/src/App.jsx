@@ -7,7 +7,10 @@ const pages = [
   ['clientes', 'Clientes e Pets'],
   ['agendamentos', 'Agendamentos'],
   ['servicos', 'Servicos'],
+  ['despesas', 'Despesas'],
+  ['estoque', 'Estoque'],
   ['financeiro', 'Financeiro'],
+  ['bi', 'BI'],
   ['ia', 'IA e Consultas']
 ];
 
@@ -40,6 +43,27 @@ const emptyService = {
   duracao_pequeno: 30,
   duracao_medio: 45,
   duracao_grande: 60
+};
+
+const emptyExpense = {
+  descricao: '',
+  categoria: 'Operacional',
+  valor: 0,
+  data_vencimento: new Date().toISOString().slice(0, 10),
+  data_pagamento: '',
+  status: 'ABERTA',
+  observacoes: ''
+};
+
+const emptyProduct = {
+  sku: '',
+  nome: '',
+  descricao: '',
+  categoria: '',
+  preco_venda: 0,
+  custo: 0,
+  estoque_atual: 0,
+  estoque_minimo: 0
 };
 
 function storedUser() {
@@ -145,7 +169,10 @@ export default function App() {
         {page === 'clientes' && <Clientes notify={notify} />}
         {page === 'agendamentos' && <Agendamentos notify={notify} />}
         {page === 'servicos' && <Servicos notify={notify} />}
+        {page === 'despesas' && <Despesas notify={notify} />}
+        {page === 'estoque' && <Estoque notify={notify} />}
         {page === 'financeiro' && <Financeiro notify={notify} />}
+        {page === 'bi' && <BI />}
         {page === 'ia' && <Assistant notify={notify} />}
         <ToastStack toasts={toasts} />
       </main>
@@ -341,11 +368,21 @@ function ClientModal({ client, onClose, onSaved }) {
 
 function HistoryModal({ pet, onClose }) {
   const { loading, error, data } = useApiData(`/pets/${pet.pet_id}/historico`, [pet.pet_id]);
+  const [reload, setReload] = useState(0);
+  const [editingRecord, setEditingRecord] = useState(false);
+  const [addingVaccine, setAddingVaccine] = useState(false);
+  const record = useApiData(`/pets/${pet.pet_id}/prontuario`, [pet.pet_id, reload]);
 
   return <Modal title={`Historico de ${pet.pet_nome}`} onClose={onClose}>
     {loading && <p>Carregando...</p>}
     {error && <ErrorMessage message={error} />}
     {data && <div className="history-list">
+      <div className="card-title"><h3>Prontuario</h3><span className="actions"><button onClick={() => setEditingRecord(true)}>Editar prontuario</button><button onClick={() => setAddingVaccine(true)}>Nova vacina</button></span></div>
+      {record.loading && <Skeleton rows={2} />}
+      {record.data && <div className="history-item"><strong>Dados clinicos</strong><span>Alergias: {record.data.prontuario?.alergias || 'Nao informado'}</span><small>Restricoes: {record.data.prontuario?.restricoes || 'Nao informado'} | Comportamento: {record.data.prontuario?.comportamento || 'Nao informado'}</small></div>}
+      {record.data && <Rows rows={record.data.vacinas} empty="Sem vacinas cadastradas" render={(item) => (
+        <div className="history-item" key={`v-${item.id}`}><strong>{item.nome}</strong><span>Aplicacao: {item.data_aplicacao || 'Sem data'} | Reforco: {item.data_reforco || 'Sem data'}</span><small>{item.observacoes || 'Sem observacoes'}</small></div>
+      )} />}
       <h3>Atendimentos e agendamentos</h3>
       <Rows rows={data.agendamentos} empty="Sem historico de agendamentos" render={(item) => (
         <div className="history-item" key={`a-${item.id}`}><strong>{item.servico_nome}</strong><span>{new Date(`${item.data}T00:00:00`).toLocaleDateString('pt-BR')} as {item.hora} - {item.status}</span><small>{item.forma_pagamento ? `${item.forma_pagamento} - ${currency(item.valor_cobrado)}` : item.observacoes || 'Sem observacoes'}</small></div>
@@ -355,7 +392,59 @@ function HistoryModal({ pet, onClose }) {
         <div className="history-item" key={`h-${item.id}`}><strong>{item.tipo}</strong><span>{new Date(item.criado_em).toLocaleString('pt-BR')}</span><small>{item.descricao}</small></div>
       )} />
     </div>}
+    {editingRecord && <ProntuarioModal petId={pet.pet_id} record={record.data?.prontuario} onClose={() => setEditingRecord(false)} onSaved={() => { setEditingRecord(false); setReload((value) => value + 1); }} />}
+    {addingVaccine && <VaccineModal petId={pet.pet_id} onClose={() => setAddingVaccine(false)} onSaved={() => { setAddingVaccine(false); setReload((value) => value + 1); }} />}
   </Modal>;
+}
+
+function ProntuarioModal({ petId, record, onClose, onSaved }) {
+  const [form, setForm] = useState({ alergias: '', restricoes: '', comportamento: '', observacoes_clinicas: '', peso_atual: '', castrado: '', ...(record || {}) });
+  const [errors, setErrors] = useState({ message: '', fields: {} });
+
+  async function submit(event) {
+    event.preventDefault();
+    try {
+      await api(`/pets/${petId}/prontuario`, { method: 'PUT', body: form });
+      onSaved();
+    } catch (error) {
+      setErrors(formErrorState(error));
+    }
+  }
+
+  return <Modal title="Editar Prontuario" onClose={onClose}><form className="form-grid" onSubmit={submit}>
+    {errors.message && <div className="alert wide">{errors.message}</div>}
+    <label>Alergias<input value={form.alergias || ''} onChange={(e) => setForm({ ...form, alergias: e.target.value })} /></label>
+    <label>Restricoes<input value={form.restricoes || ''} onChange={(e) => setForm({ ...form, restricoes: e.target.value })} /></label>
+    <label>Comportamento<input value={form.comportamento || ''} onChange={(e) => setForm({ ...form, comportamento: e.target.value })} /></label>
+    <label>Peso atual<input type="number" step="0.1" value={form.peso_atual || ''} onChange={(e) => setForm({ ...form, peso_atual: e.target.value })} /></label>
+    <label>Castrado<select value={form.castrado ?? ''} onChange={(e) => setForm({ ...form, castrado: e.target.value })}><option value="">Nao informado</option><option value="true">Sim</option><option value="false">Nao</option></select></label>
+    <label className="wide">Observacoes clinicas<input value={form.observacoes_clinicas || ''} onChange={(e) => setForm({ ...form, observacoes_clinicas: e.target.value })} /></label>
+    <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Salvar</button></div>
+  </form></Modal>;
+}
+
+function VaccineModal({ petId, onClose, onSaved }) {
+  const [form, setForm] = useState({ nome: '', data_aplicacao: '', data_reforco: '', observacoes: '' });
+  const [errors, setErrors] = useState({ message: '', fields: {} });
+
+  async function submit(event) {
+    event.preventDefault();
+    try {
+      await api(`/pets/${petId}/vacinas`, { method: 'POST', body: form });
+      onSaved();
+    } catch (error) {
+      setErrors(formErrorState(error));
+    }
+  }
+
+  return <Modal title="Nova Vacina" onClose={onClose}><form className="form-grid" onSubmit={submit}>
+    {errors.message && <div className="alert wide">{errors.message}</div>}
+    <label>Nome<input required value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} /><FieldError message={errors.fields.nome} /></label>
+    <label>Aplicacao<input type="date" value={form.data_aplicacao} onChange={(e) => setForm({ ...form, data_aplicacao: e.target.value })} /></label>
+    <label>Reforco<input type="date" value={form.data_reforco} onChange={(e) => setForm({ ...form, data_reforco: e.target.value })} /></label>
+    <label className="wide">Observacoes<input value={form.observacoes} onChange={(e) => setForm({ ...form, observacoes: e.target.value })} /></label>
+    <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Salvar</button></div>
+  </form></Modal>;
 }
 
 function Servicos({ notify }) {
@@ -446,6 +535,26 @@ function Agendamentos({ notify }) {
     }
   }
 
+  async function moveSchedule(item, nextDate) {
+    try {
+      await api(`/agendamentos/${item.id}`, {
+        method: 'PUT',
+        body: {
+          pet_id: item.pet_id,
+          servico_id: item.servico_id,
+          data: nextDate,
+          hora: item.hora,
+          status: item.status,
+          observacoes: item.observacoes || ''
+        }
+      });
+      notify('Agendamento remarcado com sucesso.', 'success');
+      setReload((value) => value + 1);
+    } catch (error) {
+      notify(error.message, 'error');
+    }
+  }
+
   return (
     <>
       <Header title="Agendamentos" subtitle="Agenda operacional com filtros por data, status e busca." action={<button className="primary" onClick={() => setEditing(emptySchedule)}>+ Novo Agendamento</button>} />
@@ -455,7 +564,7 @@ function Agendamentos({ notify }) {
         <input placeholder="Buscar agendamento" value={filters.search} onChange={(e) => setFilters({ ...filters, search: e.target.value })} />
         <button onClick={() => setFilters({ data: '', status: 'Todos', search: '' })}>Limpar</button>
       </div>
-      {data && <CalendarStrip items={data} onEdit={setEditing} />}
+      {data && <CalendarStrip items={data} onEdit={setEditing} onMove={moveSchedule} />}
       <div className="card table-card">
         {loading && <Skeleton rows={4} />}
         {error && <ErrorMessage message={error} />}
@@ -475,7 +584,7 @@ function Agendamentos({ notify }) {
   );
 }
 
-function CalendarStrip({ items, onEdit }) {
+function CalendarStrip({ items, onEdit, onMove }) {
   const byDate = items.reduce((acc, item) => {
     acc[item.data] = acc[item.data] || [];
     acc[item.data].push(item);
@@ -487,9 +596,14 @@ function CalendarStrip({ items, onEdit }) {
   return <section className="calendar-strip card">
     <div className="card-title"><h3>Calendario operacional</h3><small>Cartoes preparados para drag-and-drop futuro</small></div>
     <div className="calendar-grid">
-      {dates.map((date) => <div className="calendar-day" key={date}>
+      {dates.map((date) => <div className="calendar-day" key={date} onDragOver={(event) => event.preventDefault()} onDrop={(event) => {
+        event.preventDefault();
+        const id = Number(event.dataTransfer.getData('text/plain'));
+        const item = items.find((candidate) => candidate.id === id);
+        if (item && item.data !== date) onMove(item, date);
+      }}>
         <strong>{new Date(`${date}T00:00:00`).toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit' })}</strong>
-        {byDate[date].map((item) => <button draggable className="calendar-event" key={item.id} onClick={() => onEdit(item)} title="Arraste futuramente para remarcar">
+        {byDate[date].map((item) => <button draggable onDragStart={(event) => event.dataTransfer.setData('text/plain', String(item.id))} className="calendar-event" key={item.id} onClick={() => onEdit(item)} title="Arraste para outro dia visivel para remarcar">
           <span>{item.hora}</span>
           <b>{item.pet_nome}</b>
           <small>{item.servico_nome}</small>
@@ -554,28 +668,236 @@ function CheckoutModal({ schedule, onClose, onSaved }) {
   </form></Modal>;
 }
 
+function Despesas({ notify }) {
+  const [reload, setReload] = useState(0);
+  const [editing, setEditing] = useState(null);
+  const { loading, error, data } = useApiData('/despesas', [reload]);
+
+  async function remove(item) {
+    if (!confirm(`Excluir despesa ${item.descricao}?`)) return;
+    try {
+      await api(`/despesas/${item.id}`, { method: 'DELETE' });
+      notify('Despesa excluida com sucesso.', 'success');
+      setReload((value) => value + 1);
+    } catch (error) {
+      notify(error.message, 'error');
+    }
+  }
+
+  return <>
+    <Header title="Despesas" subtitle="Lancamentos reais usados no financeiro." action={<button className="primary" onClick={() => setEditing(emptyExpense)}>+ Nova Despesa</button>} />
+    <div className="card table-card">
+      {loading && <Skeleton rows={4} />}
+      {error && <ErrorMessage message={error} />}
+      {data && <Rows rows={data} empty="Nenhuma despesa cadastrada" render={(item) => (
+        <div className="table-row" key={item.id}>
+          <span><strong>{item.descricao}</strong><small>{item.categoria}</small></span>
+          <span>{new Date(`${item.data_vencimento}T00:00:00`).toLocaleDateString('pt-BR')}<small>{item.data_pagamento ? `Pago em ${new Date(`${item.data_pagamento}T00:00:00`).toLocaleDateString('pt-BR')}` : 'Sem pagamento'}</small></span>
+          <strong>{currency(item.valor)}</strong>
+          <Badge text={item.status} />
+          <span className="actions"><button onClick={() => setEditing(item)}>Editar</button><button onClick={() => remove(item)}>Excluir</button></span>
+        </div>
+      )} />}
+    </div>
+    {editing && <ExpenseModal expense={editing} onClose={() => setEditing(null)} onSaved={() => { notify('Despesa salva com sucesso.', 'success'); setEditing(null); setReload((v) => v + 1); }} />}
+  </>;
+}
+
+function ExpenseModal({ expense, onClose, onSaved }) {
+  const [form, setForm] = useState({ ...emptyExpense, ...expense });
+  const [errors, setErrors] = useState({ message: '', fields: {} });
+  const isEdit = Boolean(expense.id);
+
+  async function submit(event) {
+    event.preventDefault();
+    try {
+      await api(isEdit ? `/despesas/${expense.id}` : '/despesas', { method: isEdit ? 'PUT' : 'POST', body: form });
+      onSaved();
+    } catch (error) {
+      setErrors(formErrorState(error));
+    }
+  }
+
+  function field(name, value) {
+    setForm({ ...form, [name]: value });
+  }
+
+  return <Modal title={isEdit ? 'Editar Despesa' : 'Nova Despesa'} onClose={onClose}><form className="form-grid" onSubmit={submit}>
+    {errors.message && <div className="alert wide">{errors.message}</div>}
+    <label>Descricao<input required value={form.descricao} onChange={(e) => field('descricao', e.target.value)} /><FieldError message={errors.fields.descricao} /></label>
+    <label>Categoria<input value={form.categoria || ''} onChange={(e) => field('categoria', e.target.value)} /></label>
+    <label>Valor<input required type="number" step="0.01" value={form.valor} onChange={(e) => field('valor', e.target.value)} /><FieldError message={errors.fields.valor} /></label>
+    <label>Vencimento<input required type="date" value={form.data_vencimento || ''} onChange={(e) => field('data_vencimento', e.target.value)} /><FieldError message={errors.fields.data_vencimento} /></label>
+    <label>Pagamento<input type="date" value={form.data_pagamento || ''} onChange={(e) => field('data_pagamento', e.target.value)} /></label>
+    <label>Status<select value={form.status} onChange={(e) => field('status', e.target.value)}><option value="ABERTA">Aberta</option><option value="PAGA">Paga</option><option value="CANCELADA">Cancelada</option></select></label>
+    <label className="wide">Observacoes<input value={form.observacoes || ''} onChange={(e) => field('observacoes', e.target.value)} /></label>
+    <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Salvar</button></div>
+  </form></Modal>;
+}
+
+function Estoque({ notify }) {
+  const [reload, setReload] = useState(0);
+  const [editing, setEditing] = useState(null);
+  const [moving, setMoving] = useState(null);
+  const { loading, error, data } = useApiData('/produtos', [reload]);
+
+  async function remove(item) {
+    if (!confirm(`Excluir produto ${item.nome}?`)) return;
+    try {
+      await api(`/produtos/${item.id}`, { method: 'DELETE' });
+      notify('Produto excluido com sucesso.', 'success');
+      setReload((value) => value + 1);
+    } catch (error) {
+      notify(error.message, 'error');
+    }
+  }
+
+  return <>
+    <Header title="Estoque" subtitle="Produtos, niveis minimos e movimentacoes." action={<button className="primary" onClick={() => setEditing(emptyProduct)}>+ Novo Produto</button>} />
+    <div className="card table-card">
+      {loading && <Skeleton rows={4} />}
+      {error && <ErrorMessage message={error} />}
+      {data && <Rows rows={data} empty="Nenhum produto cadastrado" render={(item) => (
+        <div className="table-row service-row" key={item.id}>
+          <span><strong>{item.nome}</strong><small>{item.sku || item.categoria || 'Sem SKU'}</small></span>
+          <span>Venda {currency(item.preco_venda)}<small>Custo {currency(item.custo)}</small></span>
+          <span>Estoque {item.estoque_atual}<small>Minimo {item.estoque_minimo}</small></span>
+          <Badge text={item.estoque_atual <= item.estoque_minimo ? 'Baixo' : 'OK'} />
+          <span className="actions"><button onClick={() => setMoving(item)}>Movimentar</button><button onClick={() => setEditing(item)}>Editar</button><button onClick={() => remove(item)}>Excluir</button></span>
+        </div>
+      )} />}
+    </div>
+    {editing && <ProductModal product={editing} onClose={() => setEditing(null)} onSaved={() => { notify('Produto salvo com sucesso.', 'success'); setEditing(null); setReload((v) => v + 1); }} />}
+    {moving && <StockMoveModal product={moving} onClose={() => setMoving(null)} onSaved={() => { notify('Estoque movimentado com sucesso.', 'success'); setMoving(null); setReload((v) => v + 1); }} />}
+  </>;
+}
+
+function ProductModal({ product, onClose, onSaved }) {
+  const [form, setForm] = useState({ ...emptyProduct, ...product });
+  const [errors, setErrors] = useState({ message: '', fields: {} });
+  const isEdit = Boolean(product.id);
+
+  async function submit(event) {
+    event.preventDefault();
+    try {
+      await api(isEdit ? `/produtos/${product.id}` : '/produtos', { method: isEdit ? 'PUT' : 'POST', body: form });
+      onSaved();
+    } catch (error) {
+      setErrors(formErrorState(error));
+    }
+  }
+
+  function field(name, value) {
+    setForm({ ...form, [name]: value });
+  }
+
+  return <Modal title={isEdit ? 'Editar Produto' : 'Novo Produto'} onClose={onClose}><form className="form-grid" onSubmit={submit}>
+    {errors.message && <div className="alert wide">{errors.message}</div>}
+    <label>Nome<input required value={form.nome} onChange={(e) => field('nome', e.target.value)} /><FieldError message={errors.fields.nome} /></label>
+    <label>SKU<input value={form.sku || ''} onChange={(e) => field('sku', e.target.value)} /></label>
+    <label>Categoria<input value={form.categoria || ''} onChange={(e) => field('categoria', e.target.value)} /></label>
+    <label>Preco venda<input required type="number" step="0.01" value={form.preco_venda} onChange={(e) => field('preco_venda', e.target.value)} /></label>
+    <label>Custo<input required type="number" step="0.01" value={form.custo} onChange={(e) => field('custo', e.target.value)} /></label>
+    {!isEdit && <label>Estoque inicial<input type="number" value={form.estoque_atual} onChange={(e) => field('estoque_atual', e.target.value)} /></label>}
+    <label>Estoque minimo<input type="number" value={form.estoque_minimo} onChange={(e) => field('estoque_minimo', e.target.value)} /></label>
+    <label className="wide">Descricao<input value={form.descricao || ''} onChange={(e) => field('descricao', e.target.value)} /></label>
+    <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Salvar</button></div>
+  </form></Modal>;
+}
+
+function StockMoveModal({ product, onClose, onSaved }) {
+  const [form, setForm] = useState({ tipo: 'ENTRADA', quantidade: 1, motivo: '' });
+  const [errors, setErrors] = useState({ message: '', fields: {} });
+
+  async function submit(event) {
+    event.preventDefault();
+    try {
+      await api(`/produtos/${product.id}/movimentacoes`, { method: 'POST', body: form });
+      onSaved();
+    } catch (error) {
+      setErrors(formErrorState(error));
+    }
+  }
+
+  return <Modal title={`Movimentar ${product.nome}`} onClose={onClose}><form className="form-grid" onSubmit={submit}>
+    {errors.message && <div className="alert wide">{errors.message}</div>}
+    <label>Tipo<select value={form.tipo} onChange={(e) => setForm({ ...form, tipo: e.target.value })}><option value="ENTRADA">Entrada</option><option value="SAIDA">Saida</option><option value="AJUSTE">Ajuste para quantidade</option></select></label>
+    <label>Quantidade<input required type="number" min="0" value={form.quantidade} onChange={(e) => setForm({ ...form, quantidade: e.target.value })} /><FieldError message={errors.fields.quantidade} /></label>
+    <label className="wide">Motivo<input value={form.motivo} onChange={(e) => setForm({ ...form, motivo: e.target.value })} /></label>
+    <div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary">Registrar</button></div>
+  </form></Modal>;
+}
+
 function Financeiro({ notify }) {
-  const { loading, error, data } = useApiData('/financeiro', []);
+  const [filters, setFilters] = useState({ dataInicio: '', dataFim: '', servicoId: '' });
+  const query = new URLSearchParams(Object.fromEntries(Object.entries(filters).filter(([, value]) => value))).toString();
+  const { loading, error, data } = useApiData(`/financeiro?${query}`, [query]);
+  const servicos = useApiData('/servicos', []);
+  const relatorioServicos = useApiData(`/relatorios/servicos?${query}`, [query]);
   if (loading) return <Loading title="Financeiro" />;
   if (error) return <ErrorMessage message={error} />;
+  const reportQuery = query ? `?${query}` : '';
 
   return (
     <>
-      <Header title="Financeiro" subtitle="Receitas, despesas estimadas e lancamentos dos agendamentos." />
+      <Header title="Financeiro" subtitle="Receitas, despesas reais e lancamentos filtraveis." />
+      <div className="toolbar multi">
+        <input type="date" value={filters.dataInicio} onChange={(e) => setFilters({ ...filters, dataInicio: e.target.value })} />
+        <input type="date" value={filters.dataFim} onChange={(e) => setFilters({ ...filters, dataFim: e.target.value })} />
+        <select value={filters.servicoId} onChange={(e) => setFilters({ ...filters, servicoId: e.target.value })}><option value="">Todos os servicos</option>{(servicos.data || []).map((servico) => <option key={servico.id} value={servico.id}>{servico.nome}</option>)}</select>
+        <button onClick={() => setFilters({ dataInicio: '', dataFim: '', servicoId: '' })}>Limpar</button>
+      </div>
       <section className="metrics-grid">
         <Metric label="Receitas" value={currency(data.resumo.receitas)} hint="Mes atual" />
-        <Metric label="Despesas" value={currency(data.resumo.despesas)} hint="25% operacional" />
+        <Metric label="Despesas" value={currency(data.resumo.despesas)} hint="Lancamentos reais" />
         <Metric label="Lucro" value={currency(data.resumo.lucro)} hint="Estimado" />
         <Metric label="Em aberto" value={currency(data.resumo.aberto)} hint="Pendentes" />
       </section>
       <div className="card table-card">
-        <div className="card-title"><h3>Lancamentos</h3><span className="actions"><button onClick={() => downloadReport('/relatorios/financeiro.csv', 'financeiro-snoutsync.csv').catch((error) => notify(error.message, 'error'))}>CSV</button><button onClick={() => downloadReport('/relatorios/financeiro.pdf', 'financeiro-snoutsync.pdf').catch((error) => notify(error.message, 'error'))}>PDF</button></span></div>
+        <div className="card-title"><h3>Relatorio por servico</h3></div>
+        {relatorioServicos.loading && <Skeleton rows={3} />}
+        {relatorioServicos.data && <Rows rows={relatorioServicos.data} empty="Sem servicos no periodo" render={(item) => (
+          <div className="table-row" key={item.servico_id}><span><strong>{item.servico_nome}</strong><small>{item.quantidade} atendimento(s)</small></span><strong>{currency(item.receita)}</strong><span>Ticket medio<small>{currency(item.ticket_medio)}</small></span><span></span><span></span></div>
+        )} />}
+      </div>
+      <div className="card table-card">
+        <div className="card-title"><h3>Lancamentos</h3><span className="actions"><button onClick={() => downloadReport(`/relatorios/financeiro.csv${reportQuery}`, 'financeiro-snoutsync.csv').catch((error) => notify(error.message, 'error'))}>CSV</button><button onClick={() => downloadReport(`/relatorios/financeiro.pdf${reportQuery}`, 'financeiro-snoutsync.pdf').catch((error) => notify(error.message, 'error'))}>PDF</button></span></div>
         <Rows rows={data.lancamentos} empty="Nenhum lancamento" render={(item) => (
           <div className="table-row" key={item.id}><span>{new Date(`${item.data}T00:00:00`).toLocaleDateString('pt-BR')}</span><span>{item.descricao}</span><span>{item.categoria}</span><strong>{currency(item.valor)}</strong><Badge text={item.status} /></div>
         )} />
       </div>
     </>
   );
+}
+
+function BI() {
+  const { loading, error, data } = useApiData('/bi', []);
+  if (loading) return <Loading title="BI" />;
+  if (error) return <ErrorMessage message={error} />;
+
+  return <>
+    <Header title="BI" subtitle="Indicadores de demanda, sazonalidade e estoque." />
+    <section className="metrics-grid">
+      <Metric label="Receita media mensal" value={currency(data.previsao_demanda.receita_media_mensal)} hint={data.previsao_demanda.metodo} />
+      <Metric label="Agendamentos medio/mes" value={Number(data.previsao_demanda.agendamentos_media_mensal || 0).toFixed(1)} hint="Historico filtrado" />
+      <Metric label="Produtos cadastrados" value={data.estoque.produtos} hint="Ativos" />
+      <Metric label="Estoque baixo" value={data.estoque.abaixo_minimo} hint="Abaixo ou igual ao minimo" />
+    </section>
+    <section className="two-columns">
+      <div className="card table-card">
+        <div className="card-title"><h3>Top servicos</h3></div>
+        <Rows rows={data.servicos_top} empty="Sem dados" render={(item) => (
+          <div className="table-row" key={item.servico_id}><span><strong>{item.servico_nome}</strong><small>{item.quantidade} atendimento(s)</small></span><strong>{currency(item.receita)}</strong><span>Ticket<small>{currency(item.ticket_medio)}</small></span><span></span><span></span></div>
+        )} />
+      </div>
+      <div className="card table-card">
+        <div className="card-title"><h3>Sazonalidade mensal</h3></div>
+        <Rows rows={data.sazonalidade_mensal} empty="Sem dados" render={(item) => (
+          <div className="row" key={item.mes}><strong>{item.mes}</strong><span>{item.agendamentos} agendamento(s)</span><span>{currency(item.receita)}</span><span></span></div>
+        )} />
+      </div>
+    </section>
+  </>;
 }
 
 function Assistant({ notify }) {

@@ -32,6 +32,8 @@ export const env = {
   refreshTokenExpiresDays: numberEnv('REFRESH_TOKEN_EXPIRES_DAYS', 14),
   passwordResetExpiresMinutes: numberEnv('PASSWORD_RESET_EXPIRES_MINUTES', 30),
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:5173',
+  emailWebhookUrl: process.env.EMAIL_WEBHOOK_URL || '',
+  whatsappWebhookUrl: process.env.WHATSAPP_WEBHOOK_URL || '',
   aiApiKey: process.env.AI_API_KEY || process.env.OPENAI_API_KEY || '',
   aiModel: process.env.AI_MODEL || 'gpt-5.5',
   aiBaseUrl: process.env.AI_BASE_URL || 'https://api.openai.com/v1'

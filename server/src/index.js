@@ -8,7 +8,7 @@ import { errorHandler, notFoundHandler } from './middlewares/errors.js';
 import { apiRateLimit, authRateLimit, compressionMiddleware, corsMiddleware, requestId, securityHeaders } from './middlewares/security.js';
 import { asyncRoute, badRequest, conflict, created, notFound, ok, unauthorized } from './utils/http.js';
 import { required, validateDate, validateEnum, validateMoney, validatePositiveInt, validateStrongPassword, validateTime } from './utils/validators.js';
-import { sendPasswordResetEmail } from './services/email.js';
+import { sendEmail, sendPasswordResetEmail, sendWhatsApp } from './services/email.js';
 import { audit } from './utils/audit.js';
 
 const app = express();
@@ -54,6 +54,41 @@ const porteDb = { Pequeno: 'P', Medio: 'M', Grande: 'G', P: 'P', M: 'M', G: 'G' 
 
 function toMoney(value) {
   return Number(value || 0);
+}
+
+function empresaId(req) {
+  return req.user?.empresa_id || 1;
+}
+
+function optionalBoolean(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (value === true || value === 'true' || value === 'SIM') return true;
+  if (value === false || value === 'false' || value === 'NAO') return false;
+  return Boolean(value);
+}
+
+async function notifySchedule(req, agendamentoId, action) {
+  try {
+    const { rows } = await query(
+      `SELECT a.data::text AS data, a.hora::text AS hora, c.nome AS cliente_nome, c.telefone,
+              p.nome AS pet_nome, s.nome AS servico_nome
+         FROM agendamento a
+         JOIN pet p ON p.id = a.pet_id
+         JOIN cliente c ON c.id = p.cliente_id
+         JOIN servico s ON s.id = a.servico_id
+        WHERE a.id = $1
+        LIMIT 1`,
+      [agendamentoId]
+    );
+    const item = rows[0];
+    if (!item) return;
+    const text = `SnoutSync: ${action} para ${item.pet_nome} (${item.servico_nome}) em ${item.data} as ${String(item.hora).slice(0, 5)}.`;
+    if (item.telefone) {
+      await sendWhatsApp({ to: item.telefone, text, metadata: { agendamentoId, action } });
+    }
+  } catch (error) {
+    console.error({ requestId: req.id, notificationError: error.message });
+  }
 }
 
 function mapCliente(row) {
@@ -164,13 +199,25 @@ async function listClientes(search = '') {
   return rows.map(mapCliente);
 }
 
-async function listAgendamentos({ data, status, search } = {}) {
+async function listAgendamentos({ data, status, search, dataInicio, dataFim, servicoId } = {}) {
   const params = [];
   const filters = [];
 
   if (data) {
     params.push(data);
     filters.push(`a.data = $${params.length}`);
+  }
+  if (dataInicio) {
+    params.push(dataInicio);
+    filters.push(`a.data >= $${params.length}`);
+  }
+  if (dataFim) {
+    params.push(dataFim);
+    filters.push(`a.data <= $${params.length}`);
+  }
+  if (servicoId) {
+    params.push(Number(servicoId));
+    filters.push(`a.servico_id = $${params.length}`);
   }
   if (status && status !== 'Todos') {
     params.push(statusDb[status] || status);
@@ -237,25 +284,72 @@ async function dashboardData() {
   };
 }
 
-async function financeiroData() {
+function normalizePeriod(queryParams = {}) {
+  const dataInicio = queryParams.dataInicio || queryParams.inicio || null;
+  const dataFim = queryParams.dataFim || queryParams.fim || null;
+  const servicoId = queryParams.servicoId || queryParams.servico_id || null;
+  if (dataInicio) validateDate(dataInicio, 'dataInicio');
+  if (dataFim) validateDate(dataFim, 'dataFim');
+  return { dataInicio, dataFim, servicoId: servicoId ? validatePositiveInt(servicoId, 'servicoId') : null };
+}
+
+function buildFinanceFilters(filters, alias = 'a') {
+  const params = [];
+  const where = [];
+  if (filters.dataInicio) {
+    params.push(filters.dataInicio);
+    where.push(`${alias}.data >= $${params.length}`);
+  }
+  if (filters.dataFim) {
+    params.push(filters.dataFim);
+    where.push(`${alias}.data <= $${params.length}`);
+  }
+  if (filters.servicoId) {
+    params.push(filters.servicoId);
+    where.push(`${alias}.servico_id = $${params.length}`);
+  }
+  return { params, where: where.length ? `WHERE ${where.join(' AND ')}` : '' };
+}
+
+async function financeiroData(filters = {}) {
+  const agFilters = buildFinanceFilters(filters, 'a');
+  const despesaParams = [];
+  const despesaWhere = ['ativo = true'];
+  if (filters.dataInicio) {
+    despesaParams.push(filters.dataInicio);
+    despesaWhere.push(`data_vencimento >= $${despesaParams.length}`);
+  }
+  if (filters.dataFim) {
+    despesaParams.push(filters.dataFim);
+    despesaWhere.push(`data_vencimento <= $${despesaParams.length}`);
+  }
+
   const { rows } = await query(`
     WITH ag AS (
       SELECT a.id, a.data, a.status::text AS status, p.nome AS pet_nome, s.nome AS servico_nome, ${valorServicoSql} AS valor_estimado
         FROM agendamento a
         JOIN pet p ON p.id = a.pet_id
         JOIN servico s ON s.id = a.servico_id
+        ${agFilters.where}
     ), plan AS (
-      SELECT COALESCE(SUM(preco_mensal), 0) AS receita_planos FROM plano
+        SELECT COALESCE(SUM(preco_mensal), 0) AS receita_planos FROM plano
     )
     SELECT
       ((SELECT receita_planos FROM plan) + COALESCE((SELECT SUM(valor_estimado) FROM ag WHERE status <> 'CANCELADO'), 0))::numeric AS receitas,
-      GREATEST(120, ROUND(((SELECT receita_planos FROM plan) + COALESCE((SELECT SUM(valor_estimado) FROM ag WHERE status <> 'CANCELADO'), 0)) * 0.25))::numeric AS despesas,
       COALESCE((SELECT SUM(valor_estimado) FROM ag WHERE status = 'EM_ANDAMENTO'), 0)::numeric AS aberto
-  `);
+  `, agFilters.params);
+
+  const despesasRows = (await query(
+    `SELECT id, descricao, categoria, valor, data_vencimento::text AS data_vencimento, data_pagamento::text AS data_pagamento, status
+       FROM despesa
+      WHERE ${despesaWhere.join(' AND ')}
+      ORDER BY data_vencimento DESC, id DESC`,
+    despesaParams
+  )).rows;
 
   const receitas = toMoney(rows[0].receitas);
-  const despesas = receitas > 0 ? toMoney(rows[0].despesas) : 0;
-  const lancamentos = await listAgendamentos({});
+  const despesas = despesasRows.reduce((sum, item) => sum + toMoney(item.valor), 0);
+  const lancamentos = await listAgendamentos(filters);
 
   return {
     resumo: {
@@ -264,14 +358,93 @@ async function financeiroData() {
       lucro: receitas - despesas,
       aberto: toMoney(rows[0].aberto)
     },
-    lancamentos: lancamentos.map((item) => ({
+    lancamentos: [
+      ...lancamentos.map((item) => ({
       id: item.id,
       data: item.data,
       descricao: `${item.servico_nome} - ${item.pet_nome}`,
       categoria: 'Servicos',
       valor: item.status === 'CANCELADO' ? 0 : item.valor_estimado,
       status: item.status === 'EM_ANDAMENTO' ? 'Aberto' : item.status === 'CANCELADO' ? 'Cancelado' : 'Pago'
-    }))
+      })),
+      ...despesasRows.map((item) => ({
+        id: `d-${item.id}`,
+        data: item.data_pagamento || item.data_vencimento,
+        descricao: item.descricao,
+        categoria: item.categoria,
+        valor: -toMoney(item.valor),
+        status: item.status
+      }))
+    ]
+  };
+}
+
+async function relatorioServicosData(filters = {}) {
+  const agFilters = buildFinanceFilters(filters, 'a');
+  const { rows } = await query(
+    `SELECT s.id AS servico_id, s.nome AS servico_nome,
+            COUNT(a.id)::int AS quantidade,
+            COALESCE(SUM(CASE WHEN a.status <> 'CANCELADO' THEN ${valorServicoSql} ELSE 0 END), 0)::numeric AS receita,
+            COALESCE(AVG(CASE WHEN a.status <> 'CANCELADO' THEN ${valorServicoSql} END), 0)::numeric AS ticket_medio
+       FROM agendamento a
+       JOIN pet p ON p.id = a.pet_id
+       JOIN servico s ON s.id = a.servico_id
+      ${agFilters.where}
+      GROUP BY s.id, s.nome
+      ORDER BY receita DESC, quantidade DESC, s.nome`,
+    agFilters.params
+  );
+  return rows.map((row) => ({
+    servico_id: row.servico_id,
+    servico_nome: row.servico_nome,
+    quantidade: row.quantidade,
+    receita: toMoney(row.receita),
+    ticket_medio: toMoney(row.ticket_medio)
+  }));
+}
+
+async function biData(filters = {}) {
+  const agFilters = buildFinanceFilters(filters, 'a');
+  const [servicos, semana, sazonalidade, estoque] = await Promise.all([
+    relatorioServicosData(filters),
+    query(
+      `SELECT EXTRACT(DOW FROM a.data)::int AS dia_semana,
+              COUNT(*)::int AS agendamentos,
+              COALESCE(SUM(CASE WHEN a.status <> 'CANCELADO' THEN ${valorServicoSql} ELSE 0 END), 0)::numeric AS receita
+         FROM agendamento a
+         JOIN pet p ON p.id = a.pet_id
+         JOIN servico s ON s.id = a.servico_id
+        ${agFilters.where}
+        GROUP BY dia_semana
+        ORDER BY dia_semana`,
+      agFilters.params
+    ),
+    query(
+      `SELECT to_char(a.data, 'YYYY-MM') AS mes,
+              COUNT(*)::int AS agendamentos,
+              COALESCE(SUM(CASE WHEN a.status <> 'CANCELADO' THEN ${valorServicoSql} ELSE 0 END), 0)::numeric AS receita
+         FROM agendamento a
+         JOIN pet p ON p.id = a.pet_id
+         JOIN servico s ON s.id = a.servico_id
+        ${agFilters.where}
+        GROUP BY mes
+        ORDER BY mes`,
+      agFilters.params
+    ),
+    query('SELECT COUNT(*)::int AS produtos, COUNT(*) FILTER (WHERE estoque_atual <= estoque_minimo)::int AS abaixo_minimo FROM produto WHERE ativo = true')
+  ]);
+  const receitaTotal = sazonalidade.rows.reduce((sum, row) => sum + toMoney(row.receita), 0);
+  const meses = Math.max(sazonalidade.rows.length, 1);
+  return {
+    servicos_top: servicos.slice(0, 5),
+    demanda_por_dia_semana: semana.rows.map((row) => ({ ...row, receita: toMoney(row.receita) })),
+    sazonalidade_mensal: sazonalidade.rows.map((row) => ({ ...row, receita: toMoney(row.receita) })),
+    previsao_demanda: {
+      receita_media_mensal: receitaTotal / meses,
+      agendamentos_media_mensal: sazonalidade.rows.reduce((sum, row) => sum + Number(row.agendamentos || 0), 0) / meses,
+      metodo: 'media historica simples dos meses filtrados'
+    },
+    estoque: estoque.rows[0]
   };
 }
 
@@ -442,7 +615,7 @@ app.post('/api/auth/login', authRateLimit, asyncRoute(async (req, res) => {
   const usuario = required(req.body.usuario, 'usuario');
   const senha = required(req.body.senha, 'senha');
   const { rows } = await query(
-    `SELECT id, nome, usuario, senha, perfil::text AS perfil
+    `SELECT id, nome, usuario, senha, perfil::text AS perfil, COALESCE(empresa_id, 1) AS empresa_id
        FROM usuario
       WHERE usuario = $1 AND ativo = true
       LIMIT 1`,
@@ -558,6 +731,259 @@ app.get('/api/admin/audit-logs', requireRole('ADMIN'), asyncRoute(async (req, re
   ok(res, rows);
 }));
 
+app.get('/api/despesas', asyncRoute(async (req, res) => {
+  const filters = normalizePeriod(req.query);
+  const params = [];
+  const where = ['ativo = true'];
+  if (filters.dataInicio) {
+    params.push(filters.dataInicio);
+    where.push(`data_vencimento >= $${params.length}`);
+  }
+  if (filters.dataFim) {
+    params.push(filters.dataFim);
+    where.push(`data_vencimento <= $${params.length}`);
+  }
+  const { rows } = await query(
+    `SELECT id, descricao, categoria, valor, data_vencimento::text AS data_vencimento,
+            data_pagamento::text AS data_pagamento, status, observacoes, ativo,
+            created_at::text AS created_at, updated_at::text AS updated_at
+       FROM despesa
+      WHERE ${where.join(' AND ')}
+      ORDER BY data_vencimento DESC, id DESC`,
+    params
+  );
+  ok(res, rows);
+}));
+
+app.post('/api/despesas', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const body = req.body;
+  const status = validateEnum(body.status || 'ABERTA', ['ABERTA', 'PAGA', 'CANCELADA'], 'status');
+  const { rows } = await query(
+    `INSERT INTO despesa (descricao, categoria, valor, data_vencimento, data_pagamento, status, observacoes, created_by, updated_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+     RETURNING *`,
+    [
+      required(body.descricao, 'descricao'),
+      body.categoria || 'Operacional',
+      validateMoney(body.valor, 'valor'),
+      validateDate(body.data_vencimento || new Date().toISOString().slice(0, 10), 'data_vencimento'),
+      body.data_pagamento ? validateDate(body.data_pagamento, 'data_pagamento') : null,
+      status,
+      body.observacoes || null,
+      req.user.id
+    ]
+  );
+  await audit(req, { action: 'despesa.created', entityType: 'despesa', entityId: rows[0].id });
+  created(res, rows[0]);
+}));
+
+app.put('/api/despesas/:id', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const body = req.body;
+  const status = validateEnum(body.status || 'ABERTA', ['ABERTA', 'PAGA', 'CANCELADA'], 'status');
+  const { rows } = await query(
+    `UPDATE despesa
+        SET descricao = $1, categoria = $2, valor = $3, data_vencimento = $4, data_pagamento = $5,
+            status = $6, observacoes = $7, updated_at = NOW(), updated_by = $8
+      WHERE id = $9 AND ativo = true
+      RETURNING *`,
+    [
+      required(body.descricao, 'descricao'),
+      body.categoria || 'Operacional',
+      validateMoney(body.valor, 'valor'),
+      validateDate(body.data_vencimento, 'data_vencimento'),
+      body.data_pagamento ? validateDate(body.data_pagamento, 'data_pagamento') : null,
+      status,
+      body.observacoes || null,
+      req.user.id,
+      req.params.id
+    ]
+  );
+  if (!rows[0]) throw notFound('Despesa nao encontrada.');
+  await audit(req, { action: 'despesa.updated', entityType: 'despesa', entityId: req.params.id });
+  ok(res, rows[0]);
+}));
+
+app.delete('/api/despesas/:id', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const { rows } = await query('UPDATE despesa SET ativo = false, updated_at = NOW(), updated_by = $1 WHERE id = $2 RETURNING id', [req.user.id, req.params.id]);
+  if (!rows[0]) throw notFound('Despesa nao encontrada.');
+  await audit(req, { action: 'despesa.deleted', entityType: 'despesa', entityId: req.params.id });
+  ok(res, { deleted: true });
+}));
+
+app.get('/api/produtos', asyncRoute(async (_req, res) => {
+  const { rows } = await query(
+    `SELECT p.*, COALESCE((
+       SELECT json_agg(pm ORDER BY pm.created_at DESC)
+         FROM (SELECT id, tipo, quantidade, estoque_anterior, estoque_novo, motivo, created_at::text AS created_at
+                 FROM produto_movimentacao
+                WHERE produto_id = p.id
+                ORDER BY created_at DESC
+                LIMIT 5) pm
+     ), '[]'::json) AS ultimas_movimentacoes
+       FROM produto p
+      WHERE p.ativo = true
+      ORDER BY p.nome`
+  );
+  ok(res, rows);
+}));
+
+app.post('/api/produtos', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const body = req.body;
+  const { rows } = await query(
+    `INSERT INTO produto (sku, nome, descricao, categoria, preco_venda, custo, estoque_atual, estoque_minimo, created_by, updated_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+     RETURNING *`,
+    [
+      body.sku || null,
+      required(body.nome, 'nome'),
+      body.descricao || null,
+      body.categoria || null,
+      validateMoney(body.preco_venda ?? 0, 'preco_venda'),
+      validateMoney(body.custo ?? 0, 'custo'),
+      Number(body.estoque_atual || 0),
+      Number(body.estoque_minimo || 0),
+      req.user.id
+    ]
+  );
+  await audit(req, { action: 'produto.created', entityType: 'produto', entityId: rows[0].id });
+  created(res, rows[0]);
+}));
+
+app.put('/api/produtos/:id', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const body = req.body;
+  const { rows } = await query(
+    `UPDATE produto
+        SET sku = $1, nome = $2, descricao = $3, categoria = $4, preco_venda = $5, custo = $6,
+            estoque_minimo = $7, updated_at = NOW(), updated_by = $8
+      WHERE id = $9 AND ativo = true
+      RETURNING *`,
+    [
+      body.sku || null,
+      required(body.nome, 'nome'),
+      body.descricao || null,
+      body.categoria || null,
+      validateMoney(body.preco_venda ?? 0, 'preco_venda'),
+      validateMoney(body.custo ?? 0, 'custo'),
+      Number(body.estoque_minimo || 0),
+      req.user.id,
+      req.params.id
+    ]
+  );
+  if (!rows[0]) throw notFound('Produto nao encontrado.');
+  await audit(req, { action: 'produto.updated', entityType: 'produto', entityId: req.params.id });
+  ok(res, rows[0]);
+}));
+
+app.post('/api/produtos/:id/movimentacoes', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const tipo = validateEnum(req.body.tipo, ['ENTRADA', 'SAIDA', 'AJUSTE'], 'tipo');
+  const quantidade = Number(validatePositiveInt(req.body.quantidade, 'quantidade'));
+  const result = await transaction(async (client) => {
+    const produto = await client.query('SELECT id, estoque_atual FROM produto WHERE id = $1 AND ativo = true FOR UPDATE', [req.params.id]);
+    if (!produto.rows[0]) throw notFound('Produto nao encontrado.');
+    const anterior = Number(produto.rows[0].estoque_atual);
+    const novo = tipo === 'ENTRADA' ? anterior + quantidade : tipo === 'SAIDA' ? anterior - quantidade : quantidade;
+    if (novo < 0) throw badRequest('Estoque insuficiente para saida.', { field: 'quantidade' });
+    await client.query('UPDATE produto SET estoque_atual = $1, updated_at = NOW(), updated_by = $2 WHERE id = $3', [novo, req.user.id, req.params.id]);
+    const mov = await client.query(
+      `INSERT INTO produto_movimentacao (produto_id, tipo, quantidade, estoque_anterior, estoque_novo, motivo, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [req.params.id, tipo, quantidade, anterior, novo, req.body.motivo || null, req.user.id]
+    );
+    return mov.rows[0];
+  });
+  await audit(req, { action: 'produto.stock_moved', entityType: 'produto', entityId: req.params.id, metadata: { tipo, quantidade } });
+  created(res, result);
+}));
+
+app.delete('/api/produtos/:id', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const { rows } = await query('UPDATE produto SET ativo = false, updated_at = NOW(), updated_by = $1 WHERE id = $2 RETURNING id', [req.user.id, req.params.id]);
+  if (!rows[0]) throw notFound('Produto nao encontrado.');
+  await audit(req, { action: 'produto.deleted', entityType: 'produto', entityId: req.params.id });
+  ok(res, { deleted: true });
+}));
+
+app.get('/api/relatorios/servicos', asyncRoute(async (req, res) => {
+  ok(res, await relatorioServicosData(normalizePeriod(req.query)));
+}));
+
+app.get('/api/bi', asyncRoute(async (req, res) => {
+  ok(res, await biData(normalizePeriod(req.query)));
+}));
+
+app.get('/api/pets/:id/prontuario', asyncRoute(async (req, res) => {
+  const petId = validatePositiveInt(req.params.id, 'id');
+  const [prontuario, vacinas] = await Promise.all([
+    query('SELECT *, updated_at::text AS updated_at FROM pet_prontuario WHERE pet_id = $1 LIMIT 1', [petId]),
+    query('SELECT id, nome, data_aplicacao::text AS data_aplicacao, data_reforco::text AS data_reforco, observacoes, created_at::text AS created_at FROM pet_vacina WHERE pet_id = $1 ORDER BY COALESCE(data_reforco, data_aplicacao) DESC NULLS LAST, id DESC', [petId])
+  ]);
+  ok(res, { prontuario: prontuario.rows[0] || null, vacinas: vacinas.rows });
+}));
+
+app.put('/api/pets/:id/prontuario', asyncRoute(async (req, res) => {
+  const petId = validatePositiveInt(req.params.id, 'id');
+  const body = req.body;
+  const { rows } = await query(
+    `INSERT INTO pet_prontuario (pet_id, alergias, restricoes, comportamento, observacoes_clinicas, peso_atual, castrado, created_by, updated_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+     ON CONFLICT (pet_id)
+     DO UPDATE SET alergias = EXCLUDED.alergias,
+                   restricoes = EXCLUDED.restricoes,
+                   comportamento = EXCLUDED.comportamento,
+                   observacoes_clinicas = EXCLUDED.observacoes_clinicas,
+                   peso_atual = EXCLUDED.peso_atual,
+                   castrado = EXCLUDED.castrado,
+                   updated_at = NOW(),
+                   updated_by = EXCLUDED.updated_by
+     RETURNING *`,
+    [petId, body.alergias || null, body.restricoes || null, body.comportamento || null, body.observacoes_clinicas || null, body.peso_atual || null, optionalBoolean(body.castrado), req.user.id]
+  );
+  await audit(req, { action: 'pet_prontuario.updated', entityType: 'pet', entityId: petId });
+  ok(res, rows[0]);
+}));
+
+app.post('/api/pets/:id/vacinas', asyncRoute(async (req, res) => {
+  const petId = validatePositiveInt(req.params.id, 'id');
+  const body = req.body;
+  const { rows } = await query(
+    `INSERT INTO pet_vacina (pet_id, nome, data_aplicacao, data_reforco, observacoes, created_by, updated_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $6)
+     RETURNING *`,
+    [petId, required(body.nome, 'nome'), body.data_aplicacao ? validateDate(body.data_aplicacao, 'data_aplicacao') : null, body.data_reforco ? validateDate(body.data_reforco, 'data_reforco') : null, body.observacoes || null, req.user.id]
+  );
+  await audit(req, { action: 'pet_vacina.created', entityType: 'pet', entityId: petId, metadata: { vacinaId: rows[0].id } });
+  created(res, rows[0]);
+}));
+
+app.delete('/api/pets/:petId/vacinas/:vacinaId', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const petId = validatePositiveInt(req.params.petId, 'petId');
+  const vacinaId = validatePositiveInt(req.params.vacinaId, 'vacinaId');
+  await query('DELETE FROM pet_vacina WHERE id = $1 AND pet_id = $2', [vacinaId, petId]);
+  await audit(req, { action: 'pet_vacina.deleted', entityType: 'pet', entityId: petId, metadata: { vacinaId } });
+  ok(res, { deleted: true });
+}));
+
+app.post('/api/notificacoes/email', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const result = await sendEmail({
+    to: required(req.body.to, 'to'),
+    subject: required(req.body.subject, 'subject'),
+    text: required(req.body.text, 'text'),
+    metadata: { manual: true, userId: req.user.id }
+  });
+  await audit(req, { action: 'notification.email_sent', entityType: 'notification', metadata: result });
+  ok(res, result);
+}));
+
+app.post('/api/notificacoes/whatsapp', requireRole('ADMIN'), asyncRoute(async (req, res) => {
+  const result = await sendWhatsApp({
+    to: required(req.body.to, 'to'),
+    text: required(req.body.text, 'text'),
+    metadata: { manual: true, userId: req.user.id }
+  });
+  await audit(req, { action: 'notification.whatsapp_sent', entityType: 'notification', metadata: result });
+  ok(res, result);
+}));
+
 app.get('/api/dashboard', asyncRoute(async (_req, res) => {
   ok(res, await dashboardData());
 }));
@@ -625,7 +1051,7 @@ app.put('/api/clientes/:clienteId/pets/:petId', asyncRoute(async (req, res) => {
   ok(res, { updated: true });
 }));
 
-app.delete('/api/clientes/:clienteId', asyncRoute(async (req, res) => {
+app.delete('/api/clientes/:clienteId', requireRole('ADMIN'), asyncRoute(async (req, res) => {
   const clienteId = Number(req.params.clienteId);
   await transaction(async (client) => {
     await client.query(`DELETE FROM atendimento WHERE agendamento_id IN (SELECT a.id FROM agendamento a JOIN pet p ON p.id = a.pet_id WHERE p.cliente_id = $1)`, [clienteId]);
@@ -670,7 +1096,7 @@ app.get('/api/servicos', asyncRoute(async (_req, res) => {
   ok(res, rows);
 }));
 
-app.post('/api/servicos', asyncRoute(async (req, res) => {
+app.post('/api/servicos', requireRole('ADMIN'), asyncRoute(async (req, res) => {
   const body = req.body;
   const { rows } = await query(
     `INSERT INTO servico (nome, descricao, preco_pequeno, preco_medio, preco_grande, duracao_pequeno, duracao_medio, duracao_grande)
@@ -691,7 +1117,7 @@ app.post('/api/servicos', asyncRoute(async (req, res) => {
   created(res, rows[0]);
 }));
 
-app.put('/api/servicos/:id', asyncRoute(async (req, res) => {
+app.put('/api/servicos/:id', requireRole('ADMIN'), asyncRoute(async (req, res) => {
   const body = req.body;
   const { rows } = await query(
     `UPDATE servico
@@ -716,7 +1142,7 @@ app.put('/api/servicos/:id', asyncRoute(async (req, res) => {
   ok(res, rows[0]);
 }));
 
-app.delete('/api/servicos/:id', asyncRoute(async (req, res) => {
+app.delete('/api/servicos/:id', requireRole('ADMIN'), asyncRoute(async (req, res) => {
   const used = await query('SELECT id FROM agendamento WHERE servico_id = $1 LIMIT 1', [req.params.id]);
   if (used.rows[0]) throw conflict('Servico ja possui agendamentos e nao pode ser excluido.');
   await query('DELETE FROM servico WHERE id = $1', [req.params.id]);
@@ -743,6 +1169,7 @@ app.post('/api/agendamentos', asyncRoute(async (req, res) => {
     [petId, servicoId, data, hora, status, body.observacoes || null]
   );
   await audit(req, { action: 'agendamento.created', entityType: 'agendamento', entityId: rows[0].id });
+  await notifySchedule(req, rows[0].id, 'agendamento criado');
   created(res, { id: rows[0].id });
 }));
 
@@ -761,6 +1188,7 @@ app.put('/api/agendamentos/:id', asyncRoute(async (req, res) => {
     [petId, servicoId, data, hora, status, body.observacoes || null, req.params.id]
   );
   await audit(req, { action: 'agendamento.updated', entityType: 'agendamento', entityId: req.params.id });
+  await notifySchedule(req, req.params.id, 'agendamento atualizado');
   ok(res, { updated: true });
 }));
 
@@ -794,7 +1222,7 @@ app.post('/api/agendamentos/:id/concluir', asyncRoute(async (req, res) => {
   ok(res, { deleted: true });
 }));
 
-app.delete('/api/agendamentos/:id', asyncRoute(async (req, res) => {
+app.delete('/api/agendamentos/:id', requireRole('ADMIN'), asyncRoute(async (req, res) => {
   await transaction(async (client) => {
     await client.query('DELETE FROM atendimento WHERE agendamento_id = $1', [req.params.id]);
     await client.query('DELETE FROM agendamento WHERE id = $1', [req.params.id]);
@@ -803,12 +1231,12 @@ app.delete('/api/agendamentos/:id', asyncRoute(async (req, res) => {
   ok(res, { completed: true });
 }));
 
-app.get('/api/financeiro', asyncRoute(async (_req, res) => {
-  ok(res, await financeiroData());
+app.get('/api/financeiro', asyncRoute(async (req, res) => {
+  ok(res, await financeiroData(normalizePeriod(req.query)));
 }));
 
-app.get('/api/relatorios/financeiro.csv', asyncRoute(async (_req, res) => {
-  const financeiro = await financeiroData();
+app.get('/api/relatorios/financeiro.csv', asyncRoute(async (req, res) => {
+  const financeiro = await financeiroData(normalizePeriod(req.query));
   const rows = ['data,descricao,categoria,valor,status'];
   for (const item of financeiro.lancamentos) {
     rows.push([item.data, item.descricao, item.categoria, item.valor, item.status].map((value) => `"${String(value).replaceAll('"', '""')}"`).join(','));
@@ -818,13 +1246,17 @@ app.get('/api/relatorios/financeiro.csv', asyncRoute(async (_req, res) => {
   res.send(rows.join('\n'));
 }));
 
-app.get('/api/relatorios/financeiro.pdf', asyncRoute(async (_req, res) => {
-  const financeiro = await financeiroData();
+app.get('/api/relatorios/financeiro.pdf', asyncRoute(async (req, res) => {
+  const filters = normalizePeriod(req.query);
+  const financeiro = await financeiroData(filters);
   const doc = new PDFDocument({ margin: 42 });
   res.header('Content-Type', 'application/pdf');
   res.header('Content-Disposition', 'attachment; filename="financeiro-snoutsync.pdf"');
   doc.pipe(res);
   doc.fontSize(20).text('Relatorio Financeiro - SnoutSync');
+  if (filters.dataInicio || filters.dataFim) {
+    doc.fontSize(10).text(`Periodo: ${filters.dataInicio || 'inicio'} a ${filters.dataFim || 'fim'}`);
+  }
   doc.moveDown();
   doc.fontSize(12).text(`Receitas: R$ ${financeiro.resumo.receitas.toFixed(2)}`);
   doc.text(`Despesas: R$ ${financeiro.resumo.despesas.toFixed(2)}`);

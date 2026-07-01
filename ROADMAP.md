@@ -15,6 +15,15 @@
 - Frontend com refresh automatico de sessao, toasts, skeleton loading, busca global, tokens de design, erros por campo e calendario operacional preparado para drag-and-drop.
 - Dockerfile do backend, Dockerfile do frontend com Nginx e `docker-compose.yml` completo.
 - CI no GitHub Actions com instalacao, lint sintatico do backend e build do frontend.
+- Financeiro passou a consumir despesas reais cadastradas.
+- Produtos e estoque basico ganharam CRUD e movimentacoes de entrada, saida e ajuste.
+- Relatorios financeiros aceitam filtros por periodo/servico e ha relatorio agregado por servico.
+- CI passou a provisionar PostgreSQL e rodar testes automaticos do backend.
+- Prontuario do pet ganhou dados clinicos estruturados e vacinas.
+- Agenda ganhou drag-and-drop persistente entre dias visiveis.
+- Notificacoes por e-mail/WhatsApp usam webhooks configuraveis.
+- Multiempresa foi preparada com `empresa` e `empresa_id` nas entidades principais.
+- Painel BI basico foi criado com sazonalidade, top servicos e previsao por media historica.
 
 ## Preparado
 
@@ -28,15 +37,15 @@
 ## Proximos Passos
 
 1. Configurar envio real de e-mail e template de recuperacao de senha.
-2. Criar telas CRUD para profissionais, despesas reais e produtos/estoque.
-3. Definir matriz de permissoes por perfil e aplicar RBAC progressivamente nos endpoints administrativos.
-4. Implementar drag-and-drop real no calendario, considerando profissional/sala e conflito por recurso.
+2. Criar tela CRUD de profissionais e vincular profissional aos agendamentos.
+3. Definir matriz completa de permissoes por perfil e aplicar RBAC progressivamente.
+4. Evoluir drag-and-drop para grade semanal completa, considerando profissional/sala e conflito por recurso.
 5. Adicionar constraint opcional de telefone unico somente apos decidir a regra de negocio e limpar duplicidades.
-6. Evoluir financeiro para usar `despesa` real em vez de estimativa operacional.
-7. Adicionar testes de integracao com banco PostgreSQL provisionado no CI.
-8. Implantar logs estruturados com nivel, requestId, usuario e duracao da requisicao.
-9. Adicionar notificacoes por WhatsApp/e-mail para lembretes de agenda.
-10. Preparar multiempresa/multiloja com `tenant_id` nas tabelas principais.
+6. Expandir testes de integracao para despesas, estoque, refresh token e RBAC.
+7. Implantar logs estruturados com nivel, requestId, usuario e duracao da requisicao.
+8. Criar templates e filas para notificacoes de agenda por WhatsApp/e-mail.
+9. Aplicar isolamento multiempresa em todas as queries e telas administrativas.
+10. Evoluir estoque para movimentacoes por venda/servico e inventario.
 
 ## Longo Prazo
 

@@ -29,10 +29,16 @@ Sistema web full stack para gestao de pet shops, banho e tosa, evoluido para uma
 - Validacao de conflito de horarios na agenda.
 - Conclusao de atendimento com valor cobrado e forma de pagamento.
 - Historico do pet com atendimentos, agendamentos e notas automaticas.
-- Financeiro com receitas, despesas estimadas, lucro e lancamentos.
+- Financeiro com receitas, despesas reais cadastradas, lucro, lancamentos e filtros por periodo/servico.
+- Estoque basico com produtos e movimentacoes de entrada, saida e ajuste.
 - Relatorios financeiros em CSV e PDF.
+- Relatorio por servico em JSON.
+- Prontuario estruturado do pet com dados clinicos e vacinas.
+- Painel BI com sazonalidade mensal, top servicos e previsao simples por media historica.
+- Multiempresa preparada no banco com tabela `empresa` e `empresa_id` nas entidades principais.
+- Notificacoes por e-mail e WhatsApp via webhooks configuraveis.
 - IA em `/api/ai/ask`, com contexto seguro do PostgreSQL.
-- UX com busca global, toasts, skeleton loading, erros por campo e calendario operacional preparado para drag-and-drop.
+- UX com busca global, toasts, skeleton loading, erros por campo e calendario com drag-and-drop persistente entre dias visiveis.
 
 ## Estrutura
 
@@ -101,6 +107,8 @@ FRONTEND_URL=http://localhost:5173
 AI_API_KEY=
 AI_MODEL=gpt-5.5
 AI_BASE_URL=https://api.openai.com/v1
+EMAIL_WEBHOOK_URL=
+WHATSAPP_WEBHOOK_URL=
 ```
 
 Em producao, configure obrigatoriamente `DATABASE_URL`, `JWT_SECRET`, `NODE_ENV=production`, `CORS_ORIGIN` e HTTPS no proxy/reverse proxy.
@@ -206,10 +214,23 @@ Rotas protegidas usam `Authorization: Bearer <access_token>`:
 - `DELETE /api/clientes/:clienteId`
 - `GET /api/pets`
 - `GET /api/pets/:id/historico`
+- `GET /api/pets/:id/prontuario`
+- `PUT /api/pets/:id/prontuario`
+- `POST /api/pets/:id/vacinas`
+- `DELETE /api/pets/:petId/vacinas/:vacinaId`
 - `GET /api/servicos`
 - `POST /api/servicos`
 - `PUT /api/servicos/:id`
 - `DELETE /api/servicos/:id`
+- `GET /api/despesas`
+- `POST /api/despesas`
+- `PUT /api/despesas/:id`
+- `DELETE /api/despesas/:id`
+- `GET /api/produtos`
+- `POST /api/produtos`
+- `PUT /api/produtos/:id`
+- `DELETE /api/produtos/:id`
+- `POST /api/produtos/:id/movimentacoes`
 - `GET /api/agendamentos`
 - `POST /api/agendamentos`
 - `PUT /api/agendamentos/:id`
@@ -218,12 +239,20 @@ Rotas protegidas usam `Authorization: Bearer <access_token>`:
 - `GET /api/financeiro`
 - `GET /api/relatorios/financeiro.csv`
 - `GET /api/relatorios/financeiro.pdf`
+- `GET /api/relatorios/servicos`
+- `GET /api/bi`
+- `POST /api/notificacoes/email`
+- `POST /api/notificacoes/whatsapp`
 - `GET /api/ai/status`
 - `POST /api/ai/ask`
 
 Rotas administrativas:
 
 - `GET /api/admin/audit-logs`, restrita a `ADMIN`.
+
+Rotas de escrita/destruicao em servicos, despesas, produtos e exclusoes sensiveis exigem perfil `ADMIN`.
+
+Notificacoes usam `EMAIL_WEBHOOK_URL` e `WHATSAPP_WEBHOOK_URL`. Quando nao configuradas, a API registra o payload em log para desenvolvimento local.
 
 Resposta de sucesso:
 
@@ -260,7 +289,8 @@ Resposta de erro:
 - Skeleton loading.
 - Tokens CSS de cor, espacamento e raio.
 - Formularios exibem erro por campo quando a API retorna `details.field`.
-- Calendario operacional em agendamentos com cartoes `draggable`, preparado para persistir drag-and-drop futuramente.
+- Calendario operacional em agendamentos com cartoes `draggable` e persistencia da nova data via API.
+- Drag-and-drop entre dias visiveis da agenda persiste a nova data via API.
 
 ## IA
 
@@ -275,6 +305,7 @@ O workflow `.github/workflows/ci.yml` executa:
 - Instalacao de dependencias.
 - Verificacao sintatica do backend com `npm run lint`.
 - Build do frontend com `npm run build`.
+- Testes do backend com PostgreSQL provisionado no workflow.
 
 ## Checklist De Producao
 
@@ -285,6 +316,7 @@ O workflow `.github/workflows/ci.yml` executa:
 - Usar HTTPS no proxy/reverse proxy.
 - Configurar backup do PostgreSQL.
 - Configurar envio real de e-mail em `server/src/services/email.js`.
+- Configurar `EMAIL_WEBHOOK_URL` e `WHATSAPP_WEBHOOK_URL` para provedores reais.
 - Reduzir `JWT_EXPIRES_IN` conforme a politica de seguranca.
 - Monitorar logs com `requestId`.
 - Configurar variaveis de IA somente no servidor.
